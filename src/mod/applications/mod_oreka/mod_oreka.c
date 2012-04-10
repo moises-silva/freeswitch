@@ -39,6 +39,12 @@ SWITCH_MODULE_DEFINITION(mod_oreka, mod_oreka_load, mod_oreka_shutdown, NULL);
 
 typedef struct oreka_session_s {
 	switch_core_session_t *session;
+	switch_port_t read_rtp_port;
+	switch_port_t write_rtp_port;
+	switch_rtp_t *read_rtp_stream;
+	switch_rtp_t *write_rtp_stream;
+	switch_codec_implementation_t read_impl;
+	switch_codec_implementation_t write_impl;
 } oreka_session_t;
 
 struct {
@@ -65,6 +71,87 @@ static int oreka_write_udp(oreka_session_t *oreka, switch_stream_handle_t *udp)
 {
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_CRIT, "Oreka SIP Packet:\n%s", (const char *)udp->data);
 	return 0;
+}
+
+static int oreka_tear_down_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
+{
+	if (type == FS_OREKA_READ && oreka->read_rtp_stream) {
+		switch_rtp_release_port(globals.local_ipv4_str, oreka->read_rtp_port);
+		switch_rtp_destroy(&oreka->read_rtp_stream);
+		oreka->read_rtp_port = 0;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_CRIT, "Destroyed read rtp\n");
+	} else if (oreka->write_rtp_stream) {
+		switch_rtp_release_port(globals.local_ipv4_str, oreka->write_rtp_port);
+		switch_rtp_destroy(&oreka->write_rtp_stream);
+		oreka->write_rtp_port = 0;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_CRIT, "Destroyed write rtp\n");
+	}
+	return 0;
+}
+
+static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
+{
+	switch_port_t rtp_port = 0;
+	switch_rtp_flag_t flags = 0;
+	switch_rtp_t *rtp_stream = NULL;
+	switch_codec_implementation_t *codec_impl = NULL;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	int res = 0;
+	const char  *err = "unknown error";
+	const char *type_str = type == FS_OREKA_READ ? "read" : "write";
+
+	if (type == FS_OREKA_READ) {
+		status = switch_core_session_get_read_impl(oreka->session, &oreka->read_impl);
+		codec_impl = oreka->read_impl;
+	} else {
+		status = switch_core_session_get_write_impl(oreka->session, &oreka->write_impl);
+		codec_impl = oreka->write_impl;
+	}
+
+	if (status != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No %s codec implementation available!\n", type_str);
+		res = -1;
+		goto done;
+	}
+
+	if (!(rtp_port = switch_rtp_request_port(globals.local_ipv4_str))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to allocate %s RTP port for IP %s\n", type_str, globals.local_ipv4_str);
+		res = -1;
+		goto done;
+	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Allocated %s port %d for IP %s\n", type_str, rtp_port, globals.local_ipv4_str);
+	rtp_stream = switch_rtp_new(globals.local_ipv4_str, rtp_port, 
+			globals.local_ipv4_str, rtp_port,
+			0, /* PCMU IANA*/
+			codec_impl->samples_per_packet,
+			codec_impl->microseconds_per_packet,
+			flags, NULL, &err, switch_core_session_get_pool(oreka->session));
+	if (!rtp_stream) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create %s RTP stream at %s:%d: %s\n", 
+				type_str, globals.local_ipv4_str, rtp_port, err);
+		res = -1;
+		goto done;
+	}
+done:
+	if (res == -1) {
+		if (rtp_port) {
+			switch_rtp_release_port(globals.local_ipv4_str, rtp_port);
+		}
+		if (rtp_stream) {
+			switch_rtp_destroy(&rtp_stream);
+		}
+	} else {
+		if (type == FS_OREKA_READ) {
+			oreka->read_rtp_stream = rtp_stream;
+			oreka->read_rtp_port = rtp_port;
+		} else {
+			oreka->write_rtp_stream = rtp_stream;
+			oreka->write_rtp_port = rtp_port;
+		}
+	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Successfully created %s RTP stream at %s:%d at %dms@%dHz\n", 
+				type_str, globals.local_ipv4_str, rtp_port, codec_impl->microseconds_per_packet/1000, codec_impl->samples_per_second);
+	return res;
 }
 
 static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status_t status, oreka_stream_type_t type)
@@ -106,6 +193,17 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 		callee_id_name = callee_id_number;
 	}
 
+	/* Setup the RTP */
+	if (status == FS_OREKA_START) {
+		if (oreka_setup_rtp(oreka, type)) {
+			return -1;
+		}
+	}
+
+	if (status == FS_OREKA_STOP) {
+		oreka_tear_down_rtp(oreka, type);
+	}
+
 	/* Fill in the SDP first if this is the beginning */
 	if (status == FS_OREKA_START) {
 		sdp.write_function(&sdp, "v=0\r\n");
@@ -113,8 +211,8 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 		sdp.write_function(&sdp, "c=IN IP4 %s\r\n", globals.sip_server_ipv4_str);
 		sdp.write_function(&sdp, "s=Phone Recording (%s)\r\n", type == FS_OREKA_READ ? "RX" : "TX");
 		sdp.write_function(&sdp, "i=FreeSWITCH Oreka Recorder (pid=%d)\r\n", globals.our_pid);
-		sdp.write_function(&sdp, "m=audio %d RTP/AVP 0\r\n", 0);
-		sdp.write_function(&sdp, "a=rtpmap:0 PCMU/8000\r\n");
+		sdp.write_function(&sdp, "m=audio %d RTP/AVP 0\r\n", type == FS_OREKA_READ ? oreka->read_rtp_port : oreka->write_rtp_port);
+		sdp.write_function(&sdp, "a=rtpmap:0 PCMU/%d\r\n", type == FS_OREKA_READ ? oreka->read_sampling_rate : oreka->write_sampling_rate);
 	}
 
 	/* Request line */
