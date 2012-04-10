@@ -90,13 +90,18 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 
 	/* Get caller meta data */
 	caller_id_number = switch_caller_get_field_by_name(caller_profile, "caller_id_number");
+	
 	caller_id_name = switch_caller_get_field_by_name(caller_profile, "caller_id_name");
-	callee_id_number = switch_caller_get_field_by_name(caller_profile, "callee_id_number");
-	callee_id_name = switch_caller_get_field_by_name(caller_profile, "callee_id_name");
-
 	if (!caller_id_name) {
 		caller_id_name = caller_id_number;
 	}
+
+	callee_id_number = switch_caller_get_field_by_name(caller_profile, "callee_id_number");
+	if (!callee_id_number) {
+		callee_id_number = switch_caller_get_field_by_name(caller_profile, "destination_number");
+	}
+
+	callee_id_name = switch_caller_get_field_by_name(caller_profile, "callee_id_name");
 	if (!callee_id_name) {
 		callee_id_name = callee_id_number;
 	}
@@ -119,7 +124,7 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	sip_header.write_function(&sip_header, "Via: SIP/2.0/UDP %s:5061;branch=z9hG4bK-%s\r\n", globals.local_ipv4_str, session_uuid);
 
 	/* From */
-	sip_header.write_function(&sip_header, "From: <sip:%s@%s:5061;tag=1>\r\n", caller_id_name, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "From: <sip:%s@%s:5061;tag=1>\r\n", caller_id_number, globals.local_ipv4_str);
 
 	/* To */
 	sip_header.write_function(&sip_header, "To: <sip:%s@%s:5060>\r\n", callee_id_number, globals.local_ipv4_str);
@@ -139,7 +144,7 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	/* Subject */
 	sip_header.write_function(&sip_header, "Subject: %s %s recording of %s\r\n", 
 					status == FS_OREKA_START ? "BEGIN": "END",
-					type == FS_OREKA_READ ? "RX" : "TX", caller_id_number);
+					type == FS_OREKA_READ ? "RX" : "TX", caller_id_name);
 
 	if (status == FS_OREKA_START) {
 		/* Content-Type */
