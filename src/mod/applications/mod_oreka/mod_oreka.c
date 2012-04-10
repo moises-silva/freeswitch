@@ -29,9 +29,11 @@
  */
 
 #include <switch.h>
+#include <g711.h>
 
 #define OREKA_PRIVATE "_oreka_"
-#define OREKA_BUG_NAME "oreka"
+#define OREKA_BUG_NAME_READ "oreka_read"
+#define OREKA_BUG_NAME_WRITE "oreka_write"
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_oreka_shutdown);
@@ -45,6 +47,10 @@ typedef struct oreka_session_s {
 	switch_rtp_t *write_rtp_stream;
 	switch_codec_implementation_t read_impl;
 	switch_codec_implementation_t write_impl;
+	uint32_t read_cnt;
+	uint32_t write_cnt;
+	switch_media_bug_t *read_bug;
+	switch_media_bug_t *write_bug;
 } oreka_session_t;
 
 struct {
@@ -69,7 +75,7 @@ typedef enum {
 
 static int oreka_write_udp(oreka_session_t *oreka, switch_stream_handle_t *udp)
 {
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_CRIT, "Oreka SIP Packet:\n%s", (const char *)udp->data);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Oreka SIP Packet:\n%s", (const char *)udp->data);
 	return 0;
 }
 
@@ -79,12 +85,12 @@ static int oreka_tear_down_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 		switch_rtp_release_port(globals.local_ipv4_str, oreka->read_rtp_port);
 		switch_rtp_destroy(&oreka->read_rtp_stream);
 		oreka->read_rtp_port = 0;
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_CRIT, "Destroyed read rtp\n");
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Destroyed read rtp\n");
 	} else if (oreka->write_rtp_stream) {
 		switch_rtp_release_port(globals.local_ipv4_str, oreka->write_rtp_port);
 		switch_rtp_destroy(&oreka->write_rtp_stream);
 		oreka->write_rtp_port = 0;
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_CRIT, "Destroyed write rtp\n");
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Destroyed write rtp\n");
 	}
 	return 0;
 }
@@ -102,10 +108,10 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 
 	if (type == FS_OREKA_READ) {
 		status = switch_core_session_get_read_impl(oreka->session, &oreka->read_impl);
-		codec_impl = oreka->read_impl;
+		codec_impl = &oreka->read_impl;
 	} else {
 		status = switch_core_session_get_write_impl(oreka->session, &oreka->write_impl);
-		codec_impl = oreka->write_impl;
+		codec_impl = &oreka->write_impl;
 	}
 
 	if (status != SWITCH_STATUS_SUCCESS) {
@@ -212,7 +218,8 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 		sdp.write_function(&sdp, "s=Phone Recording (%s)\r\n", type == FS_OREKA_READ ? "RX" : "TX");
 		sdp.write_function(&sdp, "i=FreeSWITCH Oreka Recorder (pid=%d)\r\n", globals.our_pid);
 		sdp.write_function(&sdp, "m=audio %d RTP/AVP 0\r\n", type == FS_OREKA_READ ? oreka->read_rtp_port : oreka->write_rtp_port);
-		sdp.write_function(&sdp, "a=rtpmap:0 PCMU/%d\r\n", type == FS_OREKA_READ ? oreka->read_sampling_rate : oreka->write_sampling_rate);
+		sdp.write_function(&sdp, "a=rtpmap:0 PCMU/%d\r\n", type == FS_OREKA_READ 
+				? oreka->read_impl.samples_per_second : oreka->write_impl.samples_per_second);
 	}
 
 	/* Request line */
@@ -266,9 +273,40 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 
 static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
 {
-	static int count = 0;
 	oreka_session_t *oreka = user_data;
 	switch_core_session_t *session = oreka->session;
+	switch_frame_t pcmu_frame;
+	switch_frame_t linear_frame = { 0 };
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	uint8_t pcmu_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint8_t linear_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint32_t i = 0;
+	int16_t *linear_samples = NULL;
+
+	if (type == SWITCH_ABC_TYPE_READ || type == SWITCH_ABC_TYPE_WRITE) {
+		memset(&linear_frame, 0, sizeof(linear_frame));
+		linear_frame.data = linear_data;
+		linear_frame.buflen = sizeof(linear_data);
+		status = switch_core_media_bug_read(bug, &linear_frame, SWITCH_TRUE);
+		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_BREAK) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error reading media bug: %d\n", status);
+			goto done;
+		}
+		if (!linear_frame.datalen) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Linear frame with no length!\n");
+			goto done;
+		}
+		/* convert the L16 frame into PCMU */
+		linear_samples = linear_frame.data;
+		memset(&pcmu_frame, 0, sizeof(pcmu_frame));
+		for (i = 0; i < linear_frame.datalen/sizeof(int16_t); i++) {
+			pcmu_data[i] = linear_to_ulaw(linear_samples[i]);
+		}
+		pcmu_frame.source = __FUNCTION__;
+		pcmu_frame.data = pcmu_data;
+		pcmu_frame.datalen = i; 
+		pcmu_frame.payload = 0;
+	}
 
 	switch (type) {
 	case SWITCH_ABC_TYPE_INIT:
@@ -287,33 +325,61 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 		break;
 	case SWITCH_ABC_TYPE_READ:
 		{
+			if (pcmu_frame.datalen) {
+				if (!switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame)) {
+					oreka->read_cnt++;
+					if (oreka->read_cnt < 10) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (read)\n", pcmu_frame.datalen);
+					}
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (read)\n", pcmu_frame.datalen);
+				}
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_WRITE:
 		{
+			if (pcmu_frame.datalen) {
+				if (!switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame)) {
+					oreka->write_cnt++;
+					if (oreka->write_cnt < 10) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", pcmu_frame.datalen);
+					}
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (read)\n", pcmu_frame.datalen);
+				}
+			}
 		}
 		break;
 	default:
 		break;
 	}
-	count++;
+done:
 	return SWITCH_TRUE;
 }
 
 SWITCH_STANDARD_APP(oreka_start_function)
 {
-	switch_media_bug_t *bug = NULL;
 	switch_status_t status;
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	oreka_session_t *oreka = NULL;
+	switch_media_bug_t *bug = NULL;
 	char *argv[6];
 	int argc;
 	char *lbuf = NULL;
 
-	if ((bug = (switch_media_bug_t *) switch_channel_get_private(channel, "_oreka_"))) {
+	if ((oreka = (oreka_session_t *) switch_channel_get_private(channel, OREKA_PRIVATE))) {
 		if (!zstr(data) && !strcasecmp(data, "stop")) {
 			switch_channel_set_private(channel, OREKA_PRIVATE, NULL);
-			switch_core_media_bug_remove(session, &bug);
+			if (oreka->read_bug) {
+				switch_core_media_bug_remove(session, &oreka->read_bug);
+				oreka->read_bug = NULL;
+			}
+			if (oreka->write_bug) {
+				switch_core_media_bug_remove(session, &oreka->write_bug);
+				oreka->write_bug = NULL;
+			}
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Stopped oreka recorder\n");
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Cannot run oreka recording 2 times on the same session!\n");
 		}
@@ -334,14 +400,22 @@ SWITCH_STANDARD_APP(oreka_start_function)
 	}
 
 	oreka->session = session;
-	status = switch_core_media_bug_add(session, OREKA_BUG_NAME, NULL, oreka_callback, oreka, 0, 
-			(SMBF_READ_STREAM | SMBF_WRITE_STREAM | SMBF_ANSWER_REQ), &bug);
+	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_READ, NULL, oreka_callback, oreka, 0, 
+			(SMBF_READ_STREAM | SMBF_ANSWER_REQ), &bug);
 	if (status != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to attach oreka to media stream!\n");
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to attach oreka to read media stream!\n");
 		return;
 	}
-
-	switch_channel_set_private(channel, OREKA_PRIVATE, bug);
+	oreka->read_bug = bug;
+	bug = NULL;
+	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_WRITE, NULL, oreka_callback, oreka, 0, 
+			(SMBF_WRITE_STREAM | SMBF_ANSWER_REQ), &bug);
+	if (status != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to attach oreka to write media stream!\n");
+		return;
+	}
+	oreka->write_bug = bug;
+	switch_channel_set_private(channel, OREKA_PRIVATE, oreka);
 
 }
 
