@@ -78,8 +78,8 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	const char *session_uuid = switch_core_session_get_uuid(oreka->session);
 	const char *caller_id_number = NULL;
 	const char *caller_id_name = NULL;
-	const char *caller_source = NULL;
-	const char *caller_destination = NULL;
+	const char *callee_id_number = NULL;
+	const char *callee_id_name = NULL;
 
 	SWITCH_STANDARD_STREAM(sip_header);
 	SWITCH_STANDARD_STREAM(sdp);
@@ -89,10 +89,17 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	caller_profile = switch_channel_get_caller_profile(channel);
 
 	/* Get caller meta data */
-	caller_source = switch_caller_get_field_by_name(caller_profile, "source");
 	caller_id_number = switch_caller_get_field_by_name(caller_profile, "caller_id_number");
 	caller_id_name = switch_caller_get_field_by_name(caller_profile, "caller_id_name");
-	caller_destination = switch_caller_get_field_by_name(caller_profile, "destination_number");
+	callee_id_number = switch_caller_get_field_by_name(caller_profile, "callee_id_number");
+	callee_id_name = switch_caller_get_field_by_name(caller_profile, "callee_id_name");
+
+	if (!caller_id_name) {
+		caller_id_name = caller_id_number;
+	}
+	if (!callee_id_name) {
+		callee_id_name = callee_id_number;
+	}
 
 	/* Fill in the SDP first if this is the beginning */
 	if (status == FS_OREKA_START) {
@@ -106,16 +113,16 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	}
 
 	/* Request line */
-	sip_header.write_function(&sip_header, "%s sip:%s@%s:5060 SIP/2.0\r\n", method, caller_source, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "%s sip:%s@%s:5060 SIP/2.0\r\n", method, callee_id_name, globals.local_ipv4_str);
 
 	/* Via */
 	sip_header.write_function(&sip_header, "Via: SIP/2.0/UDP %s:5061;branch=z9hG4bK-%s\r\n", globals.local_ipv4_str, session_uuid);
 
 	/* From */
-	sip_header.write_function(&sip_header, "From: <sip:%s@%s:5061;tag=1>\r\n", caller_id_number, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "From: <sip:%s@%s:5061;tag=1>\r\n", caller_id_name, globals.local_ipv4_str);
 
 	/* To */
-	sip_header.write_function(&sip_header, "To: <sip:%s@%s:5060>\r\n", caller_destination, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "To: <sip:%s@%s:5060>\r\n", callee_id_number, globals.local_ipv4_str);
 
 	/* Call-ID */
 	sip_header.write_function(&sip_header, "Call-ID: %s\r\n", session_uuid);
