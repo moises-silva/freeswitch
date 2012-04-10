@@ -75,7 +75,13 @@ typedef enum {
 
 static int oreka_write_udp(oreka_session_t *oreka, switch_stream_handle_t *udp)
 {
+	switch_size_t udplen = udp->data_len;
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Oreka SIP Packet:\n%s", (const char *)udp->data);
+	switch_socket_sendto(globals.sip_socket, globals.sip_server_addr, 0, (void *)udp->data, &udplen);
+	if (udplen != udp->data_len) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_ERROR, "Failed to write SIP Packet of len %zd (wrote=%zd)", 
+				udp->data_len, udplen);
+	}
 	return 0;
 }
 
@@ -326,7 +332,7 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 	case SWITCH_ABC_TYPE_READ:
 		{
 			if (pcmu_frame.datalen) {
-				if (!switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame)) {
+				if (switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame) > 0) {
 					oreka->read_cnt++;
 					if (oreka->read_cnt < 10) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (read)\n", pcmu_frame.datalen);
@@ -340,13 +346,13 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 	case SWITCH_ABC_TYPE_WRITE:
 		{
 			if (pcmu_frame.datalen) {
-				if (!switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame)) {
+				if (switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame) > 0) {
 					oreka->write_cnt++;
 					if (oreka->write_cnt < 10) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", pcmu_frame.datalen);
 					}
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (read)\n", pcmu_frame.datalen);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write)\n", pcmu_frame.datalen);
 				}
 			}
 		}
