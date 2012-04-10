@@ -31,6 +31,7 @@ applications/mod_spandsp
 #applications/mod_avmd
 #applications/mod_memcache
 #applications/mod_spy
+#applications/mod_oreka
 applications/mod_cluechoo
 applications/mod_valet_parking
 #applications/mod_distributor
