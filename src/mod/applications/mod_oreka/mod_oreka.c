@@ -332,7 +332,7 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 	case SWITCH_ABC_TYPE_READ:
 		{
 			if (pcmu_frame.datalen) {
-				if (switch_rtp_write_frame(oreka->write_rtp_stream, &pcmu_frame) > 0) {
+				if (switch_rtp_write_frame(oreka->read_rtp_stream, &pcmu_frame) > 0) {
 					oreka->read_cnt++;
 					if (oreka->read_cnt < 10) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (read)\n", pcmu_frame.datalen);
@@ -498,7 +498,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load)
 	switch_get_addr(globals.sip_server_ipv4_str, sizeof(globals.sip_server_ipv4_str), globals.sip_server_addr);
 	globals.our_pid = getpid();
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, 
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
 		"Loading mod_oreka, sip_server_addr=%s, sip_server_ipv4_str=%s, sip_server_port=%d, local_ipv4_str=%s\n", 
 		globals.sip_server_addr_str, globals.sip_server_ipv4_str, globals.sip_server_port, globals.local_ipv4_str);
 
