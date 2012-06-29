@@ -131,9 +131,10 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 		res = -1;
 		goto done;
 	}
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Allocated %s port %d for IP %s\n", type_str, rtp_port, globals.local_ipv4_str);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Allocated %s port %d for local IP %s, destination IP %s\n", type_str,
+			rtp_port, globals.local_ipv4_str, globals.sip_server_ipv4_str);
 	rtp_stream = switch_rtp_new(globals.local_ipv4_str, rtp_port, 
-			globals.local_ipv4_str, rtp_port,
+			globals.sip_server_ipv4_str, rtp_port,
 			0, /* PCMU IANA*/
 			codec_impl->samples_per_packet,
 			codec_impl->microseconds_per_packet,
