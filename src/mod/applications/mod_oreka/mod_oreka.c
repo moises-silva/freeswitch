@@ -55,6 +55,7 @@ typedef struct oreka_session_s {
 	switch_media_bug_t *write_bug;
 	switch_event_t *invite_extra_headers;
 	switch_event_t *bye_extra_headers;
+	int usecnt;
 } oreka_session_t;
 
 struct {
@@ -219,6 +220,20 @@ static switch_event_t *get_extra_headers(oreka_session_t *oreka, oreka_recording
 	return extra_headers;
 }
 
+static void oreka_destroy(oreka_session_t *oreka)
+{
+	oreka->usecnt--;
+	if (!oreka->usecnt) {
+		if (oreka->invite_extra_headers) {
+			switch_event_destroy(&oreka->invite_extra_headers);
+		}
+		if (oreka->bye_extra_headers) {
+			switch_event_destroy(&oreka->bye_extra_headers);
+		}
+		/* Actual memory for the oreka session was taken from the switch core session pool, the core will take care of it */
+	}
+}
+
 static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status_t status, oreka_stream_type_t type)
 {
 	switch_stream_handle_t sip_header = { 0 };
@@ -357,21 +372,14 @@ done:
 		free(udp_packet.data);
 	}
 
+	if (status == FS_OREKA_STOP) {
+		oreka_destroy(oreka);
+	}
+
 	return rc;
 }
 
-static void oreka_destroy(oreka_session_t *oreka)
-{
-	if (oreka->invite_extra_headers) {
-		switch_event_destroy(&oreka->invite_extra_headers);
-	}
-	if (oreka->bye_extra_headers) {
-		switch_event_destroy(&oreka->bye_extra_headers);
-	}
-	/* Actual memory for the oreka session was taken from the switch core session pool, the core will take care of it */
-}
-
-static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+static switch_bool_t oreka_core_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type, oreka_stream_type_t stype, const char *stype_str)
 {
 	oreka_session_t *oreka = user_data;
 	switch_core_session_t *session = oreka->session;
@@ -411,17 +419,14 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 	switch (type) {
 	case SWITCH_ABC_TYPE_INIT:
 		{
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Starting Oreka recording\n");
-			oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_READ);
-			oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_WRITE);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Starting Oreka recording for %s stream\n", stype_str);
+			oreka_send_sip_message(oreka, FS_OREKA_START, stype);
 		}
 		break;
 	case SWITCH_ABC_TYPE_CLOSE:
 		{
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Done Oreka recording\n");
-			oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_READ);
-			oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_WRITE);
-			oreka_destroy(oreka);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Stopping Oreka recording for %s stream\n", stype_str);
+			oreka_send_sip_message(oreka, FS_OREKA_STOP, stype);
 		}
 		break;
 	case SWITCH_ABC_TYPE_READ:
@@ -457,6 +462,16 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 	}
 done:
 	return SWITCH_TRUE;
+}
+
+static switch_bool_t oreka_read_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+	return oreka_core_callback(bug, user_data, type, FS_OREKA_READ, "read");
+}
+
+static switch_bool_t oreka_write_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+	return oreka_core_callback(bug, user_data, type, FS_OREKA_WRITE, "write");
 }
 
 SWITCH_STANDARD_APP(oreka_start_function)
@@ -501,21 +516,23 @@ SWITCH_STANDARD_APP(oreka_start_function)
 	}
 
 	oreka->session = session;
-	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_READ, NULL, oreka_callback, oreka, 0, 
+	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_READ, NULL, oreka_read_callback, oreka, 0,
 			(SMBF_READ_STREAM | SMBF_ANSWER_REQ), &bug);
 	if (status != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to attach oreka to read media stream!\n");
 		return;
 	}
 	oreka->read_bug = bug;
+	oreka->usecnt++;
 	bug = NULL;
-	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_WRITE, NULL, oreka_callback, oreka, 0, 
+	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_WRITE, NULL, oreka_write_callback, oreka, 0,
 			(SMBF_WRITE_STREAM | SMBF_ANSWER_REQ), &bug);
 	if (status != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to attach oreka to write media stream!\n");
 		return;
 	}
 	oreka->write_bug = bug;
+	oreka->usecnt++;
 	switch_channel_set_private(channel, OREKA_PRIVATE, oreka);
 
 }
