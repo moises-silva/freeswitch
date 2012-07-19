@@ -53,6 +53,8 @@ typedef struct oreka_session_s {
 	uint32_t write_cnt;
 	switch_media_bug_t *read_bug;
 	switch_media_bug_t *write_bug;
+	switch_event_t *invite_extra_headers;
+	switch_event_t *bye_extra_headers;
 } oreka_session_t;
 
 struct {
@@ -169,6 +171,54 @@ done:
 	return res;
 }
 
+static void save_extra_headers(switch_event_t *extra_headers, switch_channel_t *channel)
+{
+	switch_event_header_t *ei = NULL;
+	for (ei = switch_channel_variable_first(channel);
+	     ei;
+	     ei = ei->next) {
+		const char *name = ei->name;
+		char *value = ei->value;
+		if (!strncasecmp(name, SIP_OREKA_HEADER_PREFIX, SIP_OREKA_HEADER_PREFIX_LEN)) {
+			switch_event_add_header_string(extra_headers, SWITCH_STACK_BOTTOM, name, value);
+		}
+	}
+	switch_channel_variable_last(channel);
+
+	/* Remove the custom header variables that were saved */
+	for (ei = extra_headers->headers;
+	     ei;
+	     ei = ei->next) {
+		char *varname = ei->name;
+		switch_channel_set_variable(channel, varname, NULL);
+	}
+}
+
+static switch_event_t *get_extra_headers(oreka_session_t *oreka, oreka_recording_status_t status)
+{
+	switch_event_t *extra_headers = NULL;
+	switch_channel_t *channel = NULL;
+	switch_core_session_t *session = oreka->session;
+
+	channel = switch_core_session_get_channel(session);
+	if (status == FS_OREKA_START) {
+		if (!oreka->invite_extra_headers) {
+			switch_event_create_subclass(&oreka->invite_extra_headers, SWITCH_EVENT_CLONE, NULL);
+			switch_assert(oreka->invite_extra_headers);
+			save_extra_headers(oreka->invite_extra_headers, channel);
+		}
+		extra_headers = oreka->invite_extra_headers;
+	} else if (status == FS_OREKA_STOP) {
+		if (!oreka->bye_extra_headers) {
+			switch_event_create_subclass(&oreka->bye_extra_headers, SWITCH_EVENT_CLONE, NULL);
+			switch_assert(oreka->bye_extra_headers);
+			save_extra_headers(oreka->bye_extra_headers, channel);
+		}
+		extra_headers = oreka->bye_extra_headers;
+	}
+	return extra_headers;
+}
+
 static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status_t status, oreka_stream_type_t type)
 {
 	switch_stream_handle_t sip_header = { 0 };
@@ -176,19 +226,25 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	switch_stream_handle_t udp_packet = { 0 };
 	switch_caller_profile_t *caller_profile = NULL;
 	switch_channel_t *channel = NULL;
-	switch_event_header_t *hi = NULL;
+	switch_event_t *extra_headers = NULL;
+	switch_event_header_t *ei = NULL;
+	switch_core_session_t *session = oreka->session;
 	const char *method = status == FS_OREKA_START ? "INVITE" : "BYE";
 	const char *session_uuid = switch_core_session_get_uuid(oreka->session);
 	const char *caller_id_number = NULL;
 	const char *caller_id_name = NULL;
 	const char *callee_id_number = NULL;
 	const char *callee_id_name = NULL;
+	int rc = 0;
+
+	channel = switch_core_session_get_channel(session);
 
 	SWITCH_STANDARD_STREAM(sip_header);
 	SWITCH_STANDARD_STREAM(sdp);
 	SWITCH_STANDARD_STREAM(udp_packet);
 
-	channel = switch_core_session_get_channel(oreka->session);
+	extra_headers = get_extra_headers(oreka, status);
+
 	caller_profile = switch_channel_get_caller_profile(channel);
 
 	/* Get caller meta data */
@@ -212,7 +268,8 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	/* Setup the RTP */
 	if (status == FS_OREKA_START) {
 		if (oreka_setup_rtp(oreka, type)) {
-			return -1;
+			rc = -1;
+			goto done;
 		}
 	}
 
@@ -261,20 +318,20 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 					status == FS_OREKA_START ? "BEGIN": "END",
 					type == FS_OREKA_READ ? "RX" : "TX", caller_id_name);
 
-	if (status == FS_OREKA_START) {
-		/* Add any custom X headers */
-		for (hi = switch_channel_variable_first(channel);
-		     hi;
-		     hi = hi->next) {
-			const char *name = hi->name;
-			char *value = hi->value;
-			if (!strncasecmp(name, SIP_OREKA_HEADER_PREFIX, SIP_OREKA_HEADER_PREFIX_LEN)) {
-				const char *hname = name +  SIP_OREKA_HEADER_PREFIX_LEN;
-				sip_header.write_function(&sip_header, "%s: %s\r\n", hname, value);
-			}
+	/* Add any custom extra headers */
+	for (ei = extra_headers->headers;
+	     ei;
+	     ei = ei->next) {
+		const char *name = ei->name;
+		char *value = ei->value;
+		if (!strncasecmp(name, SIP_OREKA_HEADER_PREFIX, SIP_OREKA_HEADER_PREFIX_LEN)) {
+			const char *hname = name +  SIP_OREKA_HEADER_PREFIX_LEN;
+			sip_header.write_function(&sip_header, "%s: %s\r\n", hname, value);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Adding custom oreka SIP header %s: %s\n", hname, value);
 		}
-		switch_channel_variable_last(channel);
+	}
 
+	if (status == FS_OREKA_START) {
 		/* Content-Type */
 		sip_header.write_function(&sip_header, "Content-Type: application/sdp\r\n");
 
@@ -287,11 +344,31 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 
 	oreka_write_udp(oreka, &udp_packet);
 
-	free(sip_header.data);
-	free(sdp.data);
-	free(udp_packet.data);
+done:
+	if (sip_header.data) {
+		free(sip_header.data);
+	}
 
-	return 0;
+	if (sdp.data) {
+		free(sdp.data);
+	}
+
+	if (udp_packet.data) {
+		free(udp_packet.data);
+	}
+
+	return rc;
+}
+
+static void oreka_destroy(oreka_session_t *oreka)
+{
+	if (oreka->invite_extra_headers) {
+		switch_event_destroy(&oreka->invite_extra_headers);
+	}
+	if (oreka->bye_extra_headers) {
+		switch_event_destroy(&oreka->bye_extra_headers);
+	}
+	/* Actual memory for the oreka session was taken from the switch core session pool, the core will take care of it */
 }
 
 static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
@@ -334,16 +411,17 @@ static switch_bool_t oreka_callback(switch_media_bug_t *bug, void *user_data, sw
 	switch (type) {
 	case SWITCH_ABC_TYPE_INIT:
 		{
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Starting Oreka recording!\n");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Starting Oreka recording\n");
 			oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_READ);
 			oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_WRITE);
 		}
 		break;
 	case SWITCH_ABC_TYPE_CLOSE:
 		{
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Done Oreka recording!\n");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Done Oreka recording\n");
 			oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_READ);
 			oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_WRITE);
+			oreka_destroy(oreka);
 		}
 		break;
 	case SWITCH_ABC_TYPE_READ:
@@ -410,8 +488,8 @@ SWITCH_STANDARD_APP(oreka_start_function)
 	}
 
 	oreka = switch_core_session_alloc(session, sizeof(*oreka));
-
-	assert(oreka != NULL);
+	switch_assert(oreka);
+	memset(oreka, 0, sizeof(*oreka));
 
 	if (data && (lbuf = switch_core_session_strdup(session, data))
 		&& (argc = switch_separate_string(lbuf, ' ', argv, (sizeof(argv) / sizeof(argv[0]))))) {
