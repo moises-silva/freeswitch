@@ -31,9 +31,11 @@
 #include <switch.h>
 #include <g711.h>
 
+static const char SIP_OREKA_HEADER_PREFIX[] = "oreka_sip_h_";
 #define OREKA_PRIVATE "_oreka_"
 #define OREKA_BUG_NAME_READ "oreka_read"
 #define OREKA_BUG_NAME_WRITE "oreka_write"
+#define SIP_OREKA_HEADER_PREFIX_LEN (sizeof(SIP_OREKA_HEADER_PREFIX)-1)
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_oreka_shutdown);
@@ -174,6 +176,7 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	switch_stream_handle_t udp_packet = { 0 };
 	switch_caller_profile_t *caller_profile = NULL;
 	switch_channel_t *channel = NULL;
+	switch_event_header_t *hi = NULL;
 	const char *method = status == FS_OREKA_START ? "INVITE" : "BYE";
 	const char *session_uuid = switch_core_session_get_uuid(oreka->session);
 	const char *caller_id_number = NULL;
@@ -259,6 +262,19 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 					type == FS_OREKA_READ ? "RX" : "TX", caller_id_name);
 
 	if (status == FS_OREKA_START) {
+		/* Add any custom X headers */
+		for (hi = switch_channel_variable_first(channel);
+		     hi;
+		     hi = hi->next) {
+			const char *name = hi->name;
+			char *value = hi->value;
+			if (!strncasecmp(name, SIP_OREKA_HEADER_PREFIX, SIP_OREKA_HEADER_PREFIX_LEN)) {
+				const char *hname = name +  SIP_OREKA_HEADER_PREFIX_LEN;
+				sip_header.write_function(&sip_header, "%s: %s\r\n", hname, value);
+			}
+		}
+		switch_channel_variable_last(channel);
+
 		/* Content-Type */
 		sip_header.write_function(&sip_header, "Content-Type: application/sdp\r\n");
 
