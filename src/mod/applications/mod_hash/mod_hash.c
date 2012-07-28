@@ -128,7 +128,7 @@ static void do_config(switch_bool_t reload);
  */
 SWITCH_LIMIT_INCR(limit_incr_hash)
 {
-	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_channel_t *channel = NULL;
 	char *hashkey = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	limit_hash_item_t *item = NULL;
@@ -137,13 +137,16 @@ SWITCH_LIMIT_INCR(limit_incr_hash)
 	uint8_t increment = 1;
 	limit_hash_item_t remote_usage;
 
-	hashkey = switch_core_session_sprintf(session, "%s_%s", realm, resource);
+	if (session) {
+		channel = switch_core_session_get_channel(session);
+	}
+	hashkey = switch_mprintf("%s_%s", realm, resource);
 
 	switch_thread_rwlock_wrlock(globals.limit_hash_rwlock);
 	/* Check if that realm+resource has ever been checked */
 	if (!(item = (limit_hash_item_t *) switch_core_hash_find(globals.limit_hash, hashkey))) {
 		/* No, create an empty structure and add it, then continue like as if it existed */
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10, "Creating new limit structure: key: %s\n", hashkey);
+		switch_limit_log(session, SWITCH_LOG_DEBUG10, "Creating new limit structure: key: %s\n", hashkey);
 		item = (limit_hash_item_t *) malloc(sizeof(limit_hash_item_t));
 		switch_assert(item);
 		memset(item, 0, sizeof(limit_hash_item_t));
@@ -151,18 +154,20 @@ SWITCH_LIMIT_INCR(limit_incr_hash)
 	}
 
 	/* Did we already run on this channel before? */
-	if ((pvt = switch_channel_get_private(channel, "limit_hash"))) {
-		/* Yes, but check if we did that realm+resource
-		   If we didnt, allow incrementing the counter.
-		   If we did, dont touch it but do the validation anyways
-		 */
-		increment = !switch_core_hash_find(pvt->hash, hashkey);
-	} else {
-		/* This is the first limit check on this channel, create a hashtable, set our prviate data */
-		pvt = (limit_hash_private_t *) switch_core_session_alloc(session, sizeof(limit_hash_private_t));
-		memset(pvt, 0, sizeof(limit_hash_private_t));
-		switch_core_hash_init(&pvt->hash, switch_core_session_get_pool(session));
-		switch_channel_set_private(channel, "limit_hash", pvt);
+	if (channel) {
+		if ((pvt = switch_channel_get_private(channel, "limit_hash"))) {
+			/* Yes, but check if we did that realm+resource
+			   If we didnt, allow incrementing the counter.
+			   If we did, dont touch it but do the validation anyways
+			 */
+			increment = !switch_core_hash_find(pvt->hash, hashkey);
+		} else {
+			/* This is the first limit check on this channel, create a hashtable, set our prviate data */
+			pvt = (limit_hash_private_t *) switch_core_session_alloc(session, sizeof(limit_hash_private_t));
+			memset(pvt, 0, sizeof(limit_hash_private_t));
+			switch_core_hash_init(&pvt->hash, switch_core_session_get_pool(session));
+			switch_channel_set_private(channel, "limit_hash", pvt);
+		}
 	}
 
  	remote_usage = get_remote_usage(hashkey);
@@ -172,21 +177,21 @@ SWITCH_LIMIT_INCR(limit_incr_hash)
 		if (item->last_check <= (now - interval)) {
 			item->rate_usage = 1;
 			item->last_check = now;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10, "Usage for %s reset to 1\n",
+			switch_limit_log(session, SWITCH_LOG_DEBUG10, "Usage for %s reset to 1\n",
 							  hashkey);
 		} else {
 			/* Always increment rate when its checked as it doesnt depend on the channel */
 			item->rate_usage++;
 
 			if ((max >= 0) && (item->rate_usage > (uint32_t) max)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s exceeds maximum rate of %d/%ds, now at %d\n",
+				switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s exceeds maximum rate of %d/%ds, now at %d\n",
 								  hashkey, max, interval, item->rate_usage);
 				status = SWITCH_STATUS_GENERR;
 				goto end;
 			}
 		}
 	} else if ((max >= 0) && (item->total_usage + increment + remote_usage.total_usage > (uint32_t) max)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s is already at max value (%d)\n", hashkey, item->total_usage);
+		switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s is already at max value (%d)\n", hashkey, item->total_usage);
 		status = SWITCH_STATUS_GENERR;
 		goto end;
 	}
@@ -194,14 +199,16 @@ SWITCH_LIMIT_INCR(limit_incr_hash)
 	if (increment) {
 		item->total_usage++;
 
-		switch_core_hash_insert(pvt->hash, hashkey, item);
+		if (pvt) {
+			switch_core_hash_insert(pvt->hash, hashkey, item);
+		}
 
 		if (max == -1) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s is now %d\n", hashkey, item->total_usage + remote_usage.total_usage);
+			switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s is now %d\n", hashkey, item->total_usage + remote_usage.total_usage);
 		} else if (interval == 0) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s is now %d/%d\n", hashkey, item->total_usage + remote_usage.total_usage, max);
+			switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s is now %d/%d\n", hashkey, item->total_usage + remote_usage.total_usage, max);
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s is now %d/%d for the last %d seconds\n", hashkey,
+			switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s is now %d/%d for the last %d seconds\n", hashkey,
 							  item->rate_usage, max, interval);
 		}
 
@@ -209,7 +216,7 @@ SWITCH_LIMIT_INCR(limit_incr_hash)
 	}
 
 	/* Save current usage & rate into channel variables so it can be used later in the dialplan, or added to CDR records */
-	{
+	if (channel) {
 		const char *susage = switch_core_session_sprintf(session, "%d", item->total_usage);
 		const char *srate = switch_core_session_sprintf(session, "%d", item->rate_usage);
 
@@ -222,6 +229,7 @@ SWITCH_LIMIT_INCR(limit_incr_hash)
 
   end:
 	switch_thread_rwlock_unlock(globals.limit_hash_rwlock);
+	switch_safe_free(hashkey);
 	return status;
 }
 
@@ -276,20 +284,24 @@ SWITCH_STANDARD_SCHED_FUNC(limit_hash_cleanup_callback)
 /* !\brief Releases usage of a limit_hash-controlled ressource  */
 SWITCH_LIMIT_RELEASE(limit_release_hash)
 {
-	switch_channel_t *channel = switch_core_session_get_channel(session);
-	limit_hash_private_t *pvt = switch_channel_get_private(channel, "limit_hash");
+	switch_channel_t *channel = NULL;
+	limit_hash_private_t *pvt = NULL;
 	limit_hash_item_t *item = NULL;
 	switch_hash_index_t *hi;
 	char *hashkey = NULL;
 
-	if (!pvt || !pvt->hash) {
-		return SWITCH_STATUS_SUCCESS;
+	if (session) {
+		channel = switch_core_session_get_channel(session);
+		pvt = switch_channel_get_private(channel, "limit_hash");
+		if (!pvt || !pvt->hash) {
+			return SWITCH_STATUS_SUCCESS;
+		}
 	}
 
 	switch_thread_rwlock_wrlock(globals.limit_hash_rwlock);
 
 	/* clear for uuid */
-	if (realm == NULL && resource == NULL) {
+	if (pvt && realm == NULL && resource == NULL) {
 		/* Loop through the channel's hashtable which contains mapping to all the limit_hash_item_t referenced by that channel */
 		while ((hi = switch_hash_first(NULL, pvt->hash))) {
 			void *val = NULL;
@@ -301,7 +313,7 @@ SWITCH_LIMIT_RELEASE(limit_release_hash)
 
 			item = (limit_hash_item_t *) val;
 			item->total_usage--;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s is now %d\n", (const char *) key, item->total_usage);
+			switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s is now %d\n", (const char *) key, item->total_usage);
 
 			if (item->total_usage == 0 && item->rate_usage == 0) {
 				/* Noone is using this item anymore */
@@ -312,13 +324,19 @@ SWITCH_LIMIT_RELEASE(limit_release_hash)
 			switch_core_hash_delete(pvt->hash, (const char *) key);
 		}
 	} else {
-		hashkey = switch_core_session_sprintf(session, "%s_%s", realm, resource);
-
-		if ((item = (limit_hash_item_t *) switch_core_hash_find(pvt->hash, hashkey))) {
+		hashkey = switch_mprintf("%s_%s", realm, resource);
+		if (pvt) {
+			item = (limit_hash_item_t *) switch_core_hash_find(pvt->hash, hashkey);
+		} else {
+			item = (limit_hash_item_t *) switch_core_hash_find(globals.limit_hash, hashkey);
+		}
+		if (item) {
 			item->total_usage--;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Usage for %s is now %d\n", (const char *) hashkey, item->total_usage);
+			switch_limit_log(session, SWITCH_LOG_INFO, "Usage for %s is now %d\n", (const char *) hashkey, item->total_usage);
 
-			switch_core_hash_delete(pvt->hash, hashkey);
+			if (pvt) {
+				switch_core_hash_delete(pvt->hash, hashkey);
+			}
 
 			if (item->total_usage == 0 && item->rate_usage == 0) {
 				/* Noone is using this item anymore */
@@ -326,6 +344,7 @@ SWITCH_LIMIT_RELEASE(limit_release_hash)
 				free(item);
 			}
 		}
+		switch_safe_free(hashkey);
 	}
 
 	switch_thread_rwlock_unlock(globals.limit_hash_rwlock);

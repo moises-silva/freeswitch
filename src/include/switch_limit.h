@@ -40,6 +40,13 @@
 
 SWITCH_BEGIN_EXTERN_C
 
+#define switch_limit_log(session, ...) do { \
+		if (session) { \
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), __VA_ARGS__); \
+		} else { \
+			switch_log_printf(SWITCH_CHANNEL_LOG, __VA_ARGS__); \
+		} \
+	} while (0);
 /*! 
   \brief Initilize the LIMIT Core System
   \param pool the memory pool to use for long term allocations
