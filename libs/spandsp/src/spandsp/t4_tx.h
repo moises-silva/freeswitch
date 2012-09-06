@@ -28,8 +28,6 @@
 #if !defined(_SPANDSP_T4_TX_H_)
 #define _SPANDSP_T4_TX_H_
 
-#define SPANDSP_SUPPORT_TIFF_FX
-
 /*! This function is a callback from the image decoders, to read the unencoded bi-level image,
     row by row. It is called for each row, with len set to the number of bytes per row expected.
     \return len for OK, or zero to indicate the end of the image data. */
@@ -41,8 +39,7 @@ typedef int (*t4_row_read_handler_t)(void *user_data, uint8_t buf[], size_t len)
 */
 typedef struct t4_tx_state_s t4_tx_state_t;
 
-#if defined(SPANDSP_SUPPORT_TIFF_FX)
-/* TIFF-FX related extensions to the tag set supported by libtiff */
+/* TIFF-FX related extensions to the TIFF tag set */
 
 /*
 Indexed(346) = 0, 1.                                                SHORT
@@ -55,7 +52,7 @@ Indexed(346) = 0, 1.                                                SHORT
     profile supports palette-color images with the ITULAB encoding.
     The SamplesPerPixel value must be 1.
 
-GlobalParametersIFD (400)                                            IFD
+GlobalParametersIFD (400)                                           IFD/LONG
     An IFD containing global parameters. It is recommended that a TIFF
     writer place this field in the first IFD, where a TIFF reader would
     find it quickly.
@@ -177,6 +174,9 @@ ImageLayer(34732)                                                   LONG
         3: ...
 */
 
+/* Define the TIFF/FX tags to extend libtiff, when using a version of libtiff where this
+   stuff has not been merged. */
+#if defined(SPANDSP_SUPPORT_TIFF_FX)  &&  !defined(TIFFTAG_FAXPROFILE)
 #define TIFFTAG_INDEXED                 346
 #define TIFFTAG_GLOBALPARAMETERSIFD     400
 #define TIFFTAG_PROFILETYPE             401
@@ -253,24 +253,14 @@ SPAN_DECLARE(int) t4_tx_end_page(t4_tx_state_t *s);
            moving forward in the buffer. The document will be padded for the
            current minimum scan line time.
     \param s The T.4 context.
-    \return The next bit (i.e. 0 or 1). For the last bit of data, bit 1 is
-            set (i.e. the returned value is 2 or 3). */
-SPAN_DECLARE(int) t4_tx_check_bit(t4_tx_state_t *s);
+    \return 0 for more data to come. SIG_STATUS_END_OF_DATA for no more data. */
+SPAN_DECLARE(int) t4_tx_image_complete(t4_tx_state_t *s);
 
 /*! \brief Get the next bit of the current document page. The document will
            be padded for the current minimum scan line time.
     \param s The T.4 context.
-    \return The next bit (i.e. 0 or 1). For the last bit of data, bit 1 is
-            set (i.e. the returned value is 2 or 3). */
+    \return The next bit (i.e. 0 or 1). SIG_STATUS_END_OF_DATA for no more data. */
 SPAN_DECLARE(int) t4_tx_get_bit(t4_tx_state_t *s);
-
-/*! \brief Get the next byte of the current document page. The document will
-           be padded for the current minimum scan line time.
-    \param s The T.4 context.
-    \return The next byte. For the last byte of data, bit 8 is
-            set. In this case, one or more bits of the byte may be padded with
-            zeros, to complete the byte. */
-SPAN_DECLARE(int) t4_tx_get_byte(t4_tx_state_t *s);
 
 /*! \brief Get the next chunk of the current document page. The document will
            be padded for the current minimum scan line time.
@@ -279,7 +269,7 @@ SPAN_DECLARE(int) t4_tx_get_byte(t4_tx_state_t *s);
     \param max_len The maximum length of the chunk.
     \return The actual length of the chunk. If this is less than max_len it 
             indicates that the end of the document has been reached. */
-SPAN_DECLARE(int) t4_tx_get_chunk(t4_tx_state_t *s, uint8_t buf[], int max_len);
+SPAN_DECLARE(int) t4_tx_get(t4_tx_state_t *s, uint8_t buf[], size_t max_len);
 
 /*! \brief End the transmission of a document. Tidy up and close the file.
            This should be used to end T.4 transmission started with t4_tx_init.

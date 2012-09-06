@@ -518,6 +518,7 @@ typedef switch_status_t (*conf_api_text_cmd_t) (conference_obj_t *, switch_strea
 
 static void conference_member_itterator(conference_obj_t *conference, switch_stream_handle_t *stream, uint8_t non_mod, conf_api_member_cmd_t pfncallback, void *data);
 static switch_status_t conf_api_sub_mute(conference_member_t *member, switch_stream_handle_t *stream, void *data);
+static switch_status_t conf_api_sub_tmute(conference_member_t *member, switch_stream_handle_t *stream, void *data);
 static switch_status_t conf_api_sub_unmute(conference_member_t *member, switch_stream_handle_t *stream, void *data);
 static switch_status_t conf_api_sub_deaf(conference_member_t *member, switch_stream_handle_t *stream, void *data);
 static switch_status_t conf_api_sub_undeaf(conference_member_t *member, switch_stream_handle_t *stream, void *data);
@@ -1029,12 +1030,8 @@ static void conference_cdr_render(conference_obj_t *conference)
 		fd = -1;
 	} else {
 		char ebuf[512] = { 0 };
-#ifdef WIN32
-		strerror_s(ebuf, sizeof(ebuf), errno);
-#else
-		strerror_r(errno, ebuf, sizeof(ebuf));
-#endif
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error writing [%s][%s]\n", path, ebuf);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error writing [%s][%s]\n",
+				path, switch_strerror_r(errno, ebuf, sizeof(ebuf)));
 	}
 
 	
@@ -1317,6 +1314,49 @@ static void send_rfc_event(conference_obj_t *conference)
 		body = conference_rfc4579_render(conference, NULL, event);
 		switch_event_add_body(event, "%s", body);
 		free(body);
+		switch_event_fire(&event);
+	}
+
+	switch_safe_free(dup_domain);
+
+}
+
+
+
+static void send_conference_notify(conference_obj_t *conference, const char *status, switch_bool_t final)
+{
+	switch_event_t *event;
+	char *name = NULL, *domain = NULL, *dup_domain = NULL;
+	
+	if (!switch_test_flag(conference, CFLAG_RFC4579)) {
+		return;
+	}
+
+	if (!(name = conference->name)) {
+		name = "conference";
+	}
+
+	if (!(domain = conference->domain)) {
+		dup_domain = switch_core_get_variable_dup("domain");
+		if (!(domain = dup_domain)) {
+			domain = "cluecon.com";
+		}
+	}
+
+
+	if (switch_event_create(&event, SWITCH_EVENT_CONFERENCE_DATA) == SWITCH_STATUS_SUCCESS) {
+		event->flags |= EF_UNIQ_HEADERS;
+
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "conference-name", name);
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "conference-domain", domain);
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "conference-event", "refer");
+
+		if (final) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "final", "true");
+		}
+
+
+		switch_event_add_body(event, "%s", status);
 		switch_event_fire(&event);
 	}
 
@@ -2170,7 +2210,7 @@ static void *SWITCH_THREAD_FUNC conference_thread_run(switch_thread_t *thread, v
 					if (x <= file_sample_len) {
 						main_frame[x] = (int32_t) bptr[x];
 					} else {
-						main_frame[x] = 255;
+						memset(&main_frame[x], 255, sizeof(main_frame[x]));
 					}
 				}
 			}
@@ -3240,7 +3280,7 @@ static void *SWITCH_THREAD_FUNC conference_loop_input(switch_thread_t *thread, v
 
 		/* skip frames that are not actual media or when we are muted or silent */
 		if ((switch_test_flag(member, MFLAG_TALKING) || member->energy_level == 0 || switch_test_flag(member->conference, CFLAG_AUDIO_ALWAYS)) 
-			&& switch_test_flag(member, MFLAG_CAN_SPEAK) &&	!switch_test_flag(member->conference, CFLAG_WAIT_MOD)) {
+			&& switch_test_flag(member, MFLAG_CAN_SPEAK) &&	!switch_test_flag(member->conference, CFLAG_WAIT_MOD) && member->conference->count > 1) {
 			switch_audio_resampler_t *read_resampler = member->read_resampler;
 			void *data;
 			uint32_t datalen;
@@ -4595,6 +4635,20 @@ static switch_status_t conf_api_sub_mute(conference_member_t *member, switch_str
 	}
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+
+static switch_status_t conf_api_sub_tmute(conference_member_t *member, switch_stream_handle_t *stream, void *data)
+{
+
+	if (member == NULL)
+		return SWITCH_STATUS_GENERR;
+
+	if (switch_test_flag(member, MFLAG_CAN_SPEAK)) {
+		return conf_api_sub_mute(member, stream, data);
+	}
+
+	return conf_api_sub_unmute(member, stream, data);
 }
 
 static switch_status_t conf_api_sub_agc(conference_obj_t *conference, switch_stream_handle_t *stream, int argc, char **argv)
@@ -6214,6 +6268,7 @@ static api_command_t conf_api_sub_commands[] = {
 	{"kick", (void_fn_t) & conf_api_sub_kick, CONF_API_SUB_MEMBER_TARGET, "kick", "<[member_id|all|last|non_moderator]> [<optional sound file>]"},
 	{"hup", (void_fn_t) & conf_api_sub_hup, CONF_API_SUB_MEMBER_TARGET, "hup", "<[member_id|all|last|non_moderator]>"},
 	{"mute", (void_fn_t) & conf_api_sub_mute, CONF_API_SUB_MEMBER_TARGET, "mute", "<[member_id|all]|last|non_moderator>"},
+	{"tmute", (void_fn_t) & conf_api_sub_tmute, CONF_API_SUB_MEMBER_TARGET, "tmute", "<[member_id|all]|last|non_moderator>"},
 	{"unmute", (void_fn_t) & conf_api_sub_unmute, CONF_API_SUB_MEMBER_TARGET, "unmute", "<[member_id|all]|last|non_moderator>"},
 	{"deaf", (void_fn_t) & conf_api_sub_deaf, CONF_API_SUB_MEMBER_TARGET, "deaf", "<[member_id|all]|last|non_moderator>"},
 	{"undeaf", (void_fn_t) & conf_api_sub_undeaf, CONF_API_SUB_MEMBER_TARGET, "undeaf", "<[member_id|all]|last|non_moderator>"},
@@ -6459,6 +6514,11 @@ static switch_status_t conference_outcall(conference_obj_t *conference,
 	int rdlock = 0;
 	switch_bool_t have_flags = SWITCH_FALSE;
 	const char *outcall_flags;
+	int track = 0;
+
+	if (var_event && switch_true(switch_event_get_header(var_event, "conference_track_status"))) {
+		track++;
+	}
 
 	*cause = SWITCH_CAUSE_NORMAL_CLEARING;
 
@@ -6500,6 +6560,12 @@ static switch_status_t conference_outcall(conference_obj_t *conference,
 	switch_mutex_lock(conference->mutex);
 	conference->originating++;
 	switch_mutex_unlock(conference->mutex);
+
+	if (track) {
+		send_conference_notify(conference, "SIP/2.0 100 Trying\r\n", SWITCH_FALSE);
+	}
+
+
 	status = switch_ivr_originate(session, &peer_session, cause, bridgeto, timeout, NULL, cid_name, cid_num, NULL, var_event, SOF_NO_LIMITS, cancel_cause);
 	switch_mutex_lock(conference->mutex);
 	conference->originating--;
@@ -6511,7 +6577,16 @@ static switch_status_t conference_outcall(conference_obj_t *conference,
 		if (caller_channel) {
 			switch_channel_hangup(caller_channel, *cause);
 		}
+
+		if (track) {
+			send_conference_notify(conference, "SIP/2.0 481 Failure\r\n", SWITCH_TRUE);
+		}
+
 		goto done;
+	}
+
+	if (track) {
+		send_conference_notify(conference, "SIP/2.0 200 OK\r\n", SWITCH_TRUE);
 	}
 
 	rdlock = 1;
@@ -8461,6 +8536,8 @@ static void call_setup_event_handler(switch_event_t *event)
 				switch_event_add_header_string(var_event, SWITCH_STACK_BOTTOM, "conference_destination_number", ext);
 
 				switch_event_add_header_string(var_event, SWITCH_STACK_BOTTOM, "conference_invite_uri", dial_uri);
+
+				switch_event_add_header_string(var_event, SWITCH_STACK_BOTTOM, "conference_track_status", "true");
 
 				if (!strncasecmp(ostr, "url+", 4)) {
 					ostr += 4;

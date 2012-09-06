@@ -1440,6 +1440,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_init(switch_core_flag_t flags, switc
 	switch_set_flag((&runtime), SCF_AUTO_SCHEMAS);
 	switch_set_flag((&runtime), SCF_CLEAR_SQL);
 	switch_set_flag((&runtime), SCF_API_EXPANSION);
+	switch_set_flag((&runtime), SCF_SESSION_THREAD_POOL);
 #ifdef WIN32
 	switch_set_flag((&runtime), SCF_THREADED_SYSTEM_EXEC);
 #endif
@@ -1751,6 +1752,12 @@ static void switch_load_core_config(const char *file)
 					} else {
 						switch_clear_flag((&runtime), SCF_AUTO_SCHEMAS);
 					}
+				} else if (!strcasecmp(var, "session-thread-pool")) {
+					if (switch_true(val)) {
+						switch_set_flag((&runtime), SCF_SESSION_THREAD_POOL);
+					} else {
+						switch_clear_flag((&runtime), SCF_SESSION_THREAD_POOL);
+					}
 				} else if (!strcasecmp(var, "auto-clear-sql")) {
 					if (switch_true(val)) {
 						switch_set_flag((&runtime), SCF_CLEAR_SQL);
@@ -1875,6 +1882,18 @@ static void switch_load_core_config(const char *file)
 					} else {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ODBC IS NOT AVAILABLE!\n");
 					}
+				} else if (!strcasecmp(var, "core-recovery-db-dsn") && !zstr(val)) {
+					if (switch_odbc_available()) {
+						runtime.recovery_odbc_dsn = switch_core_strdup(runtime.memory_pool, val);
+						if ((runtime.recovery_odbc_user = strchr(runtime.recovery_odbc_dsn, ':'))) {
+							*runtime.recovery_odbc_user++ = '\0';
+							if ((runtime.recovery_odbc_pass = strchr(runtime.recovery_odbc_user, ':'))) {
+								*runtime.recovery_odbc_pass++ = '\0';
+							}
+						}
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ODBC IS NOT AVAILABLE!\n");
+					}
 				} else if (!strcasecmp(var, "core-odbc-required") && !zstr(val)) {
 					switch_set_flag((&runtime), SCF_CORE_ODBC_REQ);
 				} else if (!strcasecmp(var, "core-dbtype") && !zstr(val)) {
@@ -1914,17 +1933,21 @@ SWITCH_DECLARE(const char *) switch_core_banner(void)
 {
 
 	return ("\n"
-			"   _____              ______        _____ _____ ____ _   _  \n"
-			"  |  ___| __ ___  ___/ ___\\ \\      / /_ _|_   _/ ___| | | | \n"
-			"  | |_ | '__/ _ \\/ _ \\___ \\\\ \\ /\\ / / | |  | || |   | |_| | \n"
-			"  |  _|| | |  __/  __/___) |\\ V  V /  | |  | || |___|  _  | \n"
-			"  |_|  |_|  \\___|\\___|____/  \\_/\\_/  |___| |_| \\____|_| |_| \n"
+			".=============================================================.\n"
+			"|   _____              ______        _____ _____ ____ _   _   |\n"
+			"|  |  ___| __ ___  ___/ ___\\ \\      / /_ _|_   _/ ___| | | |  |\n"
+			"|  | |_ | '__/ _ \\/ _ \\___ \\\\ \\ /\\ / / | |  | || |   | |_| |  |\n"
+			"|  |  _|| | |  __/  __/___) |\\ V  V /  | |  | || |___|  _  |  |\n"
+			"|  |_|  |_|  \\___|\\___|____/  \\_/\\_/  |___| |_| \\____|_| |_|  |\n"
+			"|                                                             |\n"
+			".=============================================================."
 			"\n"
-			"************************************************************\n"
-			"* Anthony Minessale II, Michael Jerris, Brian West, Others *\n"
-			"* FreeSWITCH (http://www.freeswitch.org)                   *\n"
-			"* Paypal Donations Appreciated: paypal@freeswitch.org      *\n"
-			"* Brought to you by ClueCon http://www.cluecon.com/        *\n" "************************************************************\n" 
+
+			"|   Anthony Minessale II, Michael Jerris, Brian West, Others  |\n"
+			"|   FreeSWITCH (http://www.freeswitch.org)                    |\n"
+			"|   Paypal Donations Appreciated: paypal@freeswitch.org       |\n"
+			"|   Brought to you by ClueCon http://www.cluecon.com/         |\n" 
+			".=============================================================.\n" 
 			"\n");
 }
 
@@ -1969,7 +1992,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_init_and_modload(switch_core_flag_t 
 		switch_event_fire(&event);
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "%s%s", switch_core_banner(), cc);
+#ifdef WIN32
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "%s%s\n\n", switch_core_banner(), cc);
+#else
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "%s%s%s%s%s%s\n\n", 
+					  SWITCH_SEQ_DEFAULT_COLOR,
+					  SWITCH_SEQ_FYELLOW, SWITCH_SEQ_BBLUE,
+					  switch_core_banner(), 
+					  cc, SWITCH_SEQ_DEFAULT_COLOR);
+#endif
 
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE,
@@ -2089,6 +2120,44 @@ SWITCH_DECLARE(int32_t) switch_core_session_ctl(switch_session_ctl_t cmd, void *
 	}
 
 	switch (cmd) {
+	case SCSC_RECOVER:
+		{
+			char *arg = (char *) val;
+			char *tech = NULL, *prof = NULL;
+			int r, flush = 0;
+
+			if (!zstr(arg)) {
+				tech = strdup(arg);
+				
+				if ((prof = strchr(tech, ':'))) {
+					*prof++ = '\0';
+				}
+
+				if (!strcasecmp(tech, "flush")) {
+					flush++;
+
+					if (prof) {
+						tech = prof;
+						if ((prof = strchr(tech, ':'))) {
+							*prof++ = '\0';
+						}
+					}
+				}
+
+			}
+
+			if (flush) {
+				switch_core_recovery_flush(tech, prof);
+				r = -1;
+			} else {
+				r = switch_core_recovery_recover(tech, prof);
+			}
+
+			switch_safe_free(tech);
+			return r;
+
+		}
+		break;
 	case SCSC_DEBUG_SQL:
 		{
 			if (switch_test_flag((&runtime), SCF_DEBUG_SQL)) {
@@ -2392,7 +2461,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_destroy(void)
 		switch_nat_shutdown();
 	}
 	switch_xml_destroy();
-
+	switch_core_session_uninit();
 	switch_console_shutdown();
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Closing Event Engine.\n");

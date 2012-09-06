@@ -109,7 +109,7 @@ CORE_CFLAGS += -I$(switch_srcdir)/libs/pcre
 CORE_CFLAGS += -I$(switch_srcdir)/libs/speex/include -Ilibs/speex/include
 CORE_CFLAGS += -I$(switch_srcdir)/libs/srtp/include
 CORE_CFLAGS += -I$(switch_srcdir)/libs/srtp/crypto/include -Ilibs/srtp/crypto/include
-CORE_CFLAGS += -I$(switch_srcdir)/libs/spandsp/src -I$(switch_srcdir)/libs/tiff-3.8.2/libtiff
+CORE_CFLAGS += -I$(switch_srcdir)/libs/spandsp/src -I$(switch_srcdir)/libs/tiff-4.0.2/libtiff
 
 CORE_LIBS  = libs/apr-util/libaprutil-1.la libs/apr/libapr-1.la
 CORE_LIBS += libs/sqlite/libsqlite3.la libs/pcre/libpcre.la libs/speex/libspeex/libspeexdsp.la
@@ -424,8 +424,8 @@ src/include/switch_version.h: src/include/switch_version.h.in Makefile build/pri
 	  xver="$$(./build/print_git_revision)"; \
 	  xhver="$$(./build/print_git_revision -h)"; \
 	  sed \
-	    -e "/#define *SWITCH_VERSION_REVISION\W/{s/\"\([^\"]*\)\"/\"\1$$xver\"/;}" \
-	    -e "/#define *SWITCH_VERSION_REVISION_HUMAN\W/{s/\"\([^\"]*\)\"/\"\1$$xhver\"/;}" \
+	    -e "/#define *SWITCH_VERSION_REVISION[^a-zA-Z0-9_]/{s/\"\([^\"]*\)\"/\"\1$$xver\"/;}" \
+	    -e "/#define *SWITCH_VERSION_REVISION_HUMAN[^a-zA-Z0-9_]/{s/\"\([^\"]*\)\"/\"\1$$xhver\"/;}" \
 	    $< > $@; \
 	fi;
 
@@ -585,6 +585,9 @@ libs/openzap/Makefile:
 	cd libs/openzap && autoconf
 	cd libs/openzap && ./configure
 
+version:
+	git log -1  | head -3
+
 reinstall: modwipe uninstall install
 
 update-clean: clean libs/openzap/Makefile python-reconf
@@ -617,11 +620,9 @@ sndfile-reconf:
 	cd libs/libsndfile && ./config.status
 
 tiff-reconf:
-	cd libs/tiff-3.8.2 && autoreconf -fi
-	cd libs/tiff-3.8.2 && sh ./configure.gnu
-	cd libs/spandsp && autoreconf -fi
-	cd libs/spandsp && sh ./configure.gnu
-	make mod_voipcodecs-clean
+	cd libs/tiff-4.0.2 && autoreconf -fi
+	cd libs/tiff-4.0.2 && sh ./configure.gnu
+	cd libs/tiff-4.0.2 && make
 
 python-reconf:
 	rm -f src/mod/languages/mod_python/Makefile
@@ -644,7 +645,7 @@ iks-reconf:
 	cd libs/iksemel && sh ./configure.gnu --prefix=$(prefix)
 	$(MAKE) mod_dingaling-clean
 
-spandsp-reconf:
+spandsp-reconf: tiff-reconf
 	cd libs/spandsp && $(MAKE) clean || echo
 	cd libs/spandsp && autoreconf -fi
 	cd libs/spandsp && sh ./configure.gnu --prefix=$(prefix)
@@ -659,7 +660,7 @@ cluecon:
 	@clear
 	@echo Thank you for updating. This is going to take a while so relax.
 	@echo Now would be a good time to register for ClueCon!
-	@cat cluecon.tmpl
+	@cat cluecon2.tmpl
 	@echo
 	@echo http://www.cluecon.com
 	@sleep 5
@@ -694,7 +695,7 @@ modclean: $(switch_builddir)/modules.conf
 	@cd src/mod && $(MAKE) $(AM_MAKEFLAGS) clean
 
 modwipe:
-	rm -f $(modulesdir)/*.${DYNAMIC_LIB_EXTEN}
+	rm -f $(modulesdir)/*.${DYNAMIC_LIB_EXTEN} $(modulesdir)/*.la
 
 dox:
 	cd docs && doxygen $(PWD)/docs/Doxygen.conf

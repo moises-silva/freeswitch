@@ -19,9 +19,9 @@
 # @start 1
 
 AC_PREREQ([2.59])
-AC_INIT([spandsp], [0.0.6])
+AC_INIT([spandsp], [0.0.7])
 
-SPANDSP_LT_CURRENT=2
+SPANDSP_LT_CURRENT=3
 SPANDSP_LT_REVISION=0
 SPANDSP_LT_AGE=0
 
@@ -238,10 +238,8 @@ AC_CHECK_HEADERS([FL/Fl.H])
 AC_CHECK_HEADERS([FL/Fl_Overlay_Window.H])
 AC_CHECK_HEADERS([FL/Fl_Light_Button.H])
 AC_CHECK_HEADERS([FL/fl_draw.H])
-AC_CHECK_HEADERS([FL/Fl_Cartesian.H], [], [], [],[[#include <FL/Fl.H>
-]])
-AC_CHECK_HEADERS([FL/Fl_Audio_Meter.H], [], [], [],[[#include <FL/Fl.H>
-]])
+AC_CHECK_HEADERS([FL/Fl_Cartesian.H])
+AC_CHECK_HEADERS([FL/Fl_Audio_Meter.H])
 
 AC_LANG([C])
 
@@ -516,21 +514,35 @@ AM_CONDITIONAL([COND_SSE5], [test "$enable_sse5" = yes])
 AM_CONDITIONAL([COND_AVX], [test "$enable_avx" = yes])
 
 if test "$enable_builtin_tiff" = "yes" ; then
-    abs_tiffdir="`cd $srcdir/../tiff-3.8.2/ && pwd`"
+    abs_tiffdir="`cd $srcdir/../tiff-4.0.2/ && pwd`"
     save_CFLAGS=$CFLAGS
     CFLAGS="$CFLAGS -I$abs_tiffdir/libtiff"
     AC_CHECK_HEADERS([tiffio.h])
+    AC_CHECK_HEADERS([tif_dir.h], [], [], [#include <tiffio.h>
+])
     CFLAGS="$save_CFLAGS"
     COMP_VENDOR_CFLAGS="-I$abs_tiffdir/libtiff $COMP_VENDOR_CFLAGS"
     COMP_VENDOR_LDFLAGS="-L$abs_tiffdir/libtiff $COMP_VENDOR_LDFLAGS"
-    LIBS="$LIBS $abs_tiffdir/libtiff/libtiff.la"
+    TIFF_LIBS="$abs_tiffdir/libtiff/libtiff.la"
     AC_DEFINE([HAVE_LIBTIFF], [1], [Define to 1 if you have the `tiff' library (-ltiff).])
 else
     AC_CHECK_HEADERS([tiffio.h])
-    AC_CHECK_LIB([tiff], [TIFFOpen], , AC_MSG_ERROR("Cannot build without libtiff (does your system require a libtiff-devel package?)"), -lm)
+    AC_CHECK_HEADERS([tif_dir.h], [], [], [#include <tiffio.h>
+])
+    AC_CHECK_LIB([tiff], [TIFFOpen], [TIFF_LIBS="-ltiff"], AC_MSG_ERROR("Cannot build without libtiff (does your system require a libtiff-devel package?)"), -lm)
 fi
+
+if test "$ac_cv_header_tif_dir_h" = "yes" ; then
+    AC_DEFINE([SPANDSP_SUPPORT_TIFF_FX], [1], [Support TIFF/FX in TIFF file handling])
+    SPANDSP_SUPPORT_TIFF_FX="#define SPANDSP_SUPPORT_TIFF_FX"
+else
+    SPANDSP_SUPPORT_TIFF_FX="#undef SPANDSP_SUPPORT_TIFF_FX"
+fi
+
 AC_CHECK_HEADERS([jpeglib.h])
-AC_CHECK_LIB([jpeg], [jpeg_start_compress])
+AC_CHECK_LIB([jpeg], [jpeg_start_compress], [JPEG_LIBS="-ljpeg"])
+
+LIBS="$LIBS $TIFF_LIBS $JPEG_LIBS"
 
 TESTLIBS="$SIMLIBS $TESTLIBS"
 
@@ -549,6 +561,7 @@ AC_SUBST(SPANDSP_USE_EXPORT_CAPABILITY)
 AC_SUBST(SPANDSP_SUPPORT_T42)
 AC_SUBST(SPANDSP_SUPPORT_T43)
 AC_SUBST(SPANDSP_SUPPORT_V34)
+AC_SUBST(SPANDSP_SUPPORT_TIFF_FX)
 AC_SUBST(INSERT_INTTYPES_HEADER)
 AC_SUBST(INSERT_STDINT_HEADER)
 AC_SUBST(INSERT_TGMATH_HEADER)

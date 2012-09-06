@@ -74,10 +74,11 @@ typedef enum
 typedef enum
 {
     T4_IMAGE_TYPE_BILEVEL = 0,
-    T4_IMAGE_TYPE_GRAY_8BIT = 1,
-    T4_IMAGE_TYPE_GRAY_12BIT = 2,
-    T4_IMAGE_TYPE_COLOUR_8BIT = 3,
-    T4_IMAGE_TYPE_COLOUR_12BIT = 4
+    T4_IMAGE_TYPE_COLOUR_BILEVEL = 1,
+    T4_IMAGE_TYPE_GRAY_8BIT = 2,
+    T4_IMAGE_TYPE_GRAY_12BIT = 3,
+    T4_IMAGE_TYPE_COLOUR_8BIT = 4,
+    T4_IMAGE_TYPE_COLOUR_12BIT = 5
 } t4_image_types_t;
 
 /*! Supported X resolutions, in pixels per metre. */
@@ -199,6 +200,23 @@ typedef enum
     T4_LENGTH_1200_US_LEGAL = 0
 } t4_image_length_t;
 
+/*! Return values from the T.85 decoder */
+typedef enum
+{
+    /*! More image data is needed */
+    T4_DECODE_MORE_DATA = 0,
+    /*! Image completed successfully */
+    T4_DECODE_OK = -1,
+    /*! The decoder has interrupted */
+    T4_DECODE_INTERRUPT = -2,
+    /*! An abort was found in the image data */
+    T4_DECODE_ABORTED = -3,
+    /*! A memory allocation error occurred */
+    T4_DECODE_NOMEM = -4,
+    /*! The image data is invalid. */
+    T4_DECODE_INVALID_DATA = -5
+} t4_decoder_status_t;
+
 /*!
     T.4 FAX compression/decompression descriptor. This defines the working state
     for a single instance of a T.4 FAX compression or decompression channel.
@@ -256,16 +274,10 @@ SPAN_DECLARE(int) t4_rx_put_bit(t4_rx_state_t *s, int bit);
 
 /*! \brief Put a byte of the current document page.
     \param s The T.4 context.
-    \param byte The data byte.
-    \return TRUE when the byte ends the document page, otherwise FALSE. */
-SPAN_DECLARE(int) t4_rx_put_byte(t4_rx_state_t *s, uint8_t byte);
-
-/*! \brief Put a byte of the current document page.
-    \param s The T.4 context.
     \param buf The buffer containing the chunk.
     \param len The length of the chunk.
     \return TRUE when the byte ends the document page, otherwise FALSE. */
-SPAN_DECLARE(int) t4_rx_put_chunk(t4_rx_state_t *s, const uint8_t buf[], int len);
+SPAN_DECLARE(int) t4_rx_put(t4_rx_state_t *s, const uint8_t buf[], size_t len);
 
 /*! \brief Complete the reception of a page.
     \param s The T.4 receive context.

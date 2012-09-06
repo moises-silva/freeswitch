@@ -29,23 +29,31 @@
 #include "config.h"
 #endif
 
-#include <inttypes.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include <memory.h>
 #include <string.h>
-#include <tiffio.h>
 #if defined(HAVE_TGMATH_H)
 #include <tgmath.h>
 #endif
 #if defined(HAVE_MATH_H)
 #include <math.h>
 #endif
-#include <time.h>
 #include "floating_fudge.h"
+#include <tiffio.h>
+#include <assert.h>
 #include <jpeglib.h>
 #include <setjmp.h>
 
 #include "spandsp/telephony.h"
+#include "spandsp/fast_convert.h"
 #include "spandsp/logging.h"
+#include "spandsp/saturated.h"
 #include "spandsp/async.h"
 #include "spandsp/timezone.h"
 #include "spandsp/t4_rx.h"
@@ -61,7 +69,10 @@
 
 #define T42_USE_LUTS
 
+#include "t42_t43_local.h"
+#if defined(T42_USE_LUTS)
 #include "cielab_luts.h"
+#endif
 
 typedef struct
 {
@@ -197,7 +208,7 @@ SPAN_DECLARE(void) set_lab_gamut2(lab_params_t *s, int L_P, int L_Q, int a_P, in
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(void) set_illuminant_from_code(lab_params_t *s, const uint8_t code[4])
+void set_illuminant_from_code(logging_state_t *logging, lab_params_t *s, const uint8_t code[4])
 {
     int i;
     int colour_temp;
@@ -205,42 +216,44 @@ SPAN_DECLARE(void) set_illuminant_from_code(lab_params_t *s, const uint8_t code[
     if (code[0] == 'C'  &&  code[1] == 'T')
     {
         colour_temp = pack_16(&code[2]);
-        printf("Illuminant colour temp %dK\n", colour_temp);
+        span_log(logging, SPAN_LOG_FLOW, "Illuminant colour temp %dK\n", colour_temp);
         return;
     }
     for (i = 0;  illuminants[i].name[0];  i++)
     {
         if (memcmp(code, illuminants[i].tag, 4) == 0)
         {
-            printf("Illuminant %s\n", illuminants[i].name);
+            span_log(logging, SPAN_LOG_FLOW, "Illuminant %s\n", illuminants[i].name);
             set_lab_illuminant(s, illuminants[i].xn, illuminants[i].yn, illuminants[i].zn);
             break;
         }
     }
     if (illuminants[i].name[0] == '\0')
-        printf("Unrecognised illuminant 0x%x 0x%x 0x%x 0x%x\n", code[0], code[1], code[2], code[3]);
+        span_log(logging, SPAN_LOG_FLOW, "Unrecognised illuminant 0x%x 0x%x 0x%x 0x%x\n", code[0], code[1], code[2], code[3]);
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(void) set_gamut_from_code(lab_params_t *s, const uint8_t code[12])
+void set_gamut_from_code(logging_state_t *logging, lab_params_t *s, const uint8_t code[12])
 {
     int i;
     int val[6];
 
     for (i = 0;  i < 6;  i++)
         val[i] = pack_16(&code[2*i]);
-    printf("Gamut L=[%d,%d], a*=[%d,%d], b*=[%d,%d]\n",
-           val[0],
-           val[1],
-           val[2],
-           val[3],
-           val[4],
-           val[5]);
+    span_log(logging,
+             SPAN_LOG_FLOW,
+             "Gamut L=[%d,%d], a*=[%d,%d], b*=[%d,%d]\n",
+             val[0],
+             val[1],
+             val[2],
+             val[3],
+             val[4],
+             val[5]);
     set_lab_gamut2(s, val[0], val[1], val[2], val[3], val[4], val[5]);
 }
 /*- End of function --------------------------------------------------------*/
 
-static int isITUfax(lab_params_t *s, jpeg_saved_marker_ptr ptr)
+static int is_itu_fax(logging_state_t *logging, lab_params_t *s, jpeg_saved_marker_ptr ptr)
 {
     const uint8_t *data;
     int ok;
@@ -252,6 +265,11 @@ static int isITUfax(lab_params_t *s, jpeg_saved_marker_ptr ptr)
     {
         if (ptr->marker == (JPEG_APP0 + 1)  &&  ptr->data_length >= 6)
         {
+            /* Markers are:
+                JPEG_RST0
+                JPEG_EOI
+                JPEG_APP0
+                JPEG_COM */
             data = (const uint8_t *) ptr->data;
             if (strncmp((const char *) data, "G3FAX", 5) == 0)
             {
@@ -260,29 +278,57 @@ static int isITUfax(lab_params_t *s, jpeg_saved_marker_ptr ptr)
                 case 0:
                     for (i = 0;  i < 2;  i++)
                         val[i] = pack_16(&data[6 + 2*i]);
-                    printf("Version %d, resolution %d dpi\n", val[0], val[1]);
+                    span_log(logging, SPAN_LOG_FLOW, "Version %d, resolution %d dpi\n", val[0], val[1]);
                     ok = TRUE;
                     break;
                 case 1:
-                    printf("Set gamut\n");
-                    set_gamut_from_code(s, &data[6]);
-                    ok = TRUE;
+                    span_log(logging, SPAN_LOG_FLOW, "Set gamut\n");
+                    if (ptr->data_length >= 6 + 12)
+                    {
+                        set_gamut_from_code(logging, s, &data[6]);
+                        ok = TRUE;
+                    }
+                    else
+                    {
+                        span_log(logging, SPAN_LOG_FLOW, "Got bad G3FAX1 length - %d\n", ptr->data_length);
+                    }
                     break;
                 case 2:
-                    printf("Set illuminant\n");
-                    set_illuminant_from_code(s, &data[6]);
-                    ok = TRUE;
+                    span_log(logging, SPAN_LOG_FLOW, "Set illuminant\n");
+                    if (ptr->data_length >= 6 + 4)
+                    {
+                        set_illuminant_from_code(logging, s, &data[6]);
+                        ok = TRUE;
+                    }
+                    else
+                    {
+                        span_log(logging, SPAN_LOG_FLOW, "Got bad G3FAX2 length - %d\n", ptr->data_length);
+                    }
                     break;
                 case 3:
                     /* Colour palette table */
-                    printf("Set colour palette\n");
-                    val[0] = pack_16(&data[6]);
-                    printf("Colour palette %d\n", val[0]);
+                    span_log(logging, SPAN_LOG_FLOW, "Set colour palette\n");
+                    if (ptr->data_length >= 6 + 2)
+                    {
+                        val[0] = pack_16(&data[6]);
+                        span_log(logging, SPAN_LOG_FLOW, "Colour palette %d\n", val[0]);
+                    }
+                    else
+                    {
+                        span_log(logging, SPAN_LOG_FLOW, "Got bad G3FAX3 length - %d\n", ptr->data_length);
+                    }
+                    break;
+                default:
+                    span_log(logging, SPAN_LOG_FLOW, "Got unexpected G3FAX%d length - %d\n", data[5], ptr->data_length);
                     break;
                 }
             }
         }
-
+        else
+        {
+            span_log(logging, SPAN_LOG_FLOW, "Got marker 0x%x, length %d\n", ptr->marker, ptr->data_length);
+            span_log_buf(logging, SPAN_LOG_FLOW, "Got marker", (const uint8_t *) ptr->data, ptr->data_length);
+        }
         ptr = ptr->next;
     }
 
@@ -290,7 +336,7 @@ static int isITUfax(lab_params_t *s, jpeg_saved_marker_ptr ptr)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void SetITUFax(j_compress_ptr cinfo)
+static void set_itu_fax(j_compress_ptr cinfo)
 {
     uint8_t marker[10] =
     {
@@ -324,15 +370,10 @@ static __inline__ void itu_to_lab(lab_params_t *s, cielab_t *lab, const uint8_t 
 
 static __inline__ void lab_to_itu(lab_params_t *s, uint8_t out[3], const cielab_t *lab)
 {
-    float val;
-
     /* T.4 E.6.4 */
-    val = floorf(lab->L/s->range_L + s->offset_L);
-    out[0] = (uint8_t) (val < 0.0)  ?  0  :  (val < 256.0)  ?  val  :  255;
-    val = floorf(lab->a/s->range_a + s->offset_a);
-    out[1] = (uint8_t) (val < 0.0)  ?  0  :  (val < 256.0)  ?  val  :  255;
-    val = floorf(lab->b/s->range_b + s->offset_b);
-    out[2] = (uint8_t) (val < 0.0)  ?  0  :  (val < 256.0)  ?  val  :  255;
+    out[0] = saturateu8(floorf(lab->L/s->range_L + s->offset_L));
+    out[1] = saturateu8(floorf(lab->a/s->range_a + s->offset_a));
+    out[2] = saturateu8(floorf(lab->b/s->range_b + s->offset_b));
     if (s->ab_are_signed)
     {
         out[1] -= 128;
@@ -355,16 +396,16 @@ SPAN_DECLARE(void) srgb_to_lab(lab_params_t *s, uint8_t lab[], const uint8_t srg
     cielab_t l;
     int i;
 
-    for (i = 0;  i < pixels;  i++)
+    for (i = 0;  i < 3*pixels;  i += 3)
     {
 #if defined(T42_USE_LUTS)
-        r = sRGB_to_linear[srgb[0]];
-        g = sRGB_to_linear[srgb[1]];
-        b = sRGB_to_linear[srgb[2]];
+        r = srgb_to_linear[srgb[i]];
+        g = srgb_to_linear[srgb[i + 1]];
+        b = srgb_to_linear[srgb[i + 2]];
 #else
-        r = srgb[0]/256.0f;
-        g = srgb[1]/256.0f;
-        b = srgb[2]/256.0f;
+        r = srgb[i]/256.0f;
+        g = srgb[i + 1]/256.0f;
+        b = srgb[i + 2]/256.0f;
 
         /* sRGB to linear RGB */
         r = (r > 0.04045f)  ?  powf((r + 0.055f)/1.055f, 2.4f)  :  r/12.92f;
@@ -392,7 +433,6 @@ SPAN_DECLARE(void) srgb_to_lab(lab_params_t *s, uint8_t lab[], const uint8_t srg
 
         lab_to_itu(s, lab, &l);
 
-        srgb += 3;
         lab += 3;
     }
 }
@@ -411,7 +451,7 @@ SPAN_DECLARE(void) lab_to_srgb(lab_params_t *s, uint8_t srgb[], const uint8_t la
     int val;
     int i;
 
-    for (i = 0;  i < pixels;  i++)
+    for (i = 0;  i < 3*pixels;  i += 3)
     {
         itu_to_lab(s, &l, lab);
 
@@ -436,79 +476,97 @@ SPAN_DECLARE(void) lab_to_srgb(lab_params_t *s, uint8_t srgb[], const uint8_t la
 
 #if defined(T42_USE_LUTS)
         val = r*4096.0f;
-        srgb[0] = linear_to_sRGB[(val < 0)  ?  0  :  (val < 4095)  ?  val  :  4095];
+        srgb[i] = linear_to_srgb[(val < 0)  ?  0  :  (val < 4095)  ?  val  :  4095];
         val = g*4096.0f;
-        srgb[1] = linear_to_sRGB[(val < 0)  ?  0  :  (val < 4095)  ?  val  :  4095];
+        srgb[i + 1] = linear_to_srgb[(val < 0)  ?  0  :  (val < 4095)  ?  val  :  4095];
         val = b*4096.0f;
-        srgb[2] = linear_to_sRGB[(val < 0)  ?  0  :  (val < 4095)  ?  val  :  4095];
+        srgb[i + 2] = linear_to_srgb[(val < 0)  ?  0  :  (val < 4095)  ?  val  :  4095];
 #else
         /* Linear RGB to sRGB */
         r = (r > 0.0031308f)  ?  (1.055f*powf(r, 1.0f/2.4f) - 0.055f)  :  r*12.92f;
         g = (g > 0.0031308f)  ?  (1.055f*powf(g, 1.0f/2.4f) - 0.055f)  :  g*12.92f;
         b = (b > 0.0031308f)  ?  (1.055f*powf(b, 1.0f/2.4f) - 0.055f)  :  b*12.92f;
 
-        r = floorf(r*256.0f);
-        g = floorf(g*256.0f);
-        b = floorf(b*256.0f);
-
-        srgb[0] = (r < 0)  ?  0  :  (r <= 255)  ?  r  :  255;
-        srgb[1] = (g < 0)  ?  0  :  (g <= 255)  ?  g  :  255;
-        srgb[2] = (b < 0)  ?  0  :  (b <= 255)  ?  b  :  255;
+        srgb[i] = saturateu8(floorf(r*256.0f));
+        srgb[i + 1] = saturateu8(floorf(g*256.0f));
+        srgb[i + 2] = saturateu8(floorf(b*256.0f));
 #endif
-        srgb += 3;
         lab += 3;
     }
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_itulab_to_jpeg(lab_params_t *s, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, char *emsg, size_t max_emsg_bytes)
+SPAN_DECLARE(int) t42_itulab_to_jpeg(logging_state_t *logging, lab_params_t *s, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen)
 {
     struct jpeg_decompress_struct decompressor;
     struct jpeg_compress_struct compressor;
-    char *outptr;
-    size_t outsize;
     FILE *in;
     FILE *out;
     int m;
     JSAMPROW scan_line_in;
     JSAMPROW scan_line_out;
     escape_route_t escape;
+#if defined(HAVE_OPEN_MEMSTREAM)
+    char *outptr;
+    size_t outsize;
+#endif
 
     escape.error_message[0] = '\0';
-    emsg[0] = '\0';
 
 #if defined(HAVE_OPEN_MEMSTREAM)
-    in = fmemopen(src, srclen, "r");
-#else
-    in = tmpfile();
-    fwrite(src, 1, srclen, in);
-    rewind(in);
-#endif
-    if (in == NULL)
+    if ((in = fmemopen(src, srclen, "r")) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to fmemopen().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to fmemopen().\n");
         return FALSE;
     }
-
-#if defined(HAVE_OPEN_MEMSTREAM)
-    out = open_memstream(&outptr, &outsize);
-#else
-    out = tmpfile();
-#endif
-    if (out == NULL)
+    outsize = 0;
+    if ((out = open_memstream(&outptr, &outsize)) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to open_memstream().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to open_memstream().\n");
+        fclose(in);
         return FALSE;
     }
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(in);
+        fclose(out);
+        return FALSE;
+    }
+#else
+    if ((in = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        return FALSE;
+    }
+    if (fwrite(src, 1, srclen, in) != srclen)
+    {
+        fclose(in);
+        return FALSE;
+    }
+    if (fseek(in, 0, SEEK_SET) != 0)
+    {
+        fclose(in);
+        return FALSE;
+    }
+    if ((out = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        fclose(in);
+        return FALSE;
+    }
+#endif
+    scan_line_out = NULL;
 
     if (setjmp(escape.escape))
     {
-        strncpy(emsg, escape.error_message, max_emsg_bytes - 1);
-        emsg[max_emsg_bytes - 1] = '\0';
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Unspecified libjpeg error.");
+        if (escape.error_message[0])
+            span_log(logging, SPAN_LOG_FLOW, "%s\n", escape.error_message);
+        else
+            span_log(logging, SPAN_LOG_FLOW, "Unspecified libjpeg error.\n");
+        if (scan_line_out)
+            free(scan_line_out);
+        fclose(in);
+        fclose(out);
         return FALSE;
     }
 
@@ -532,14 +590,13 @@ SPAN_DECLARE(int) t42_itulab_to_jpeg(lab_params_t *s, tdata_t *dst, tsize_t *dst
     /* Take the header */
     jpeg_read_header(&decompressor, TRUE);
 
-    /* Now we can force the input colorspace. For ITULab, we will use YCbCr as a "don't touch" marker */
+    /* Now we can force the input colour space. For ITULab, we use YCbCr as a "don't touch" marker */
     decompressor.out_color_space = JCS_YCbCr;
 
     /* Sanity check and parameter check */
-    if (!isITUfax(s, decompressor.marker_list))
+    if (!is_itu_fax(logging, s, decompressor.marker_list))
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Is not ITUFAX.");
+        span_log(logging, SPAN_LOG_FLOW, "Is not an ITU FAX.\n");
         return FALSE;
     }
 
@@ -552,12 +609,13 @@ SPAN_DECLARE(int) t42_itulab_to_jpeg(lab_params_t *s, tdata_t *dst, tsize_t *dst
     jpeg_create_compress(&compressor);
     jpeg_stdio_dest(&compressor, out);
 
-    /* Force the destination color space */
+    /* Force the destination colour space */
     compressor.in_color_space = JCS_RGB;
     compressor.input_components = 3;
 
     jpeg_set_defaults(&compressor);
-    //jpeg_set_quality(&compressor, quality, TRUE /* limit to baseline-JPEG values */);
+    /* Limit to baseline-JPEG values */
+    //jpeg_set_quality(&compressor, quality, TRUE);
 
     /* Copy size, resolution, etc */
     jpeg_copy_critical_parameters(&decompressor, &compressor);
@@ -592,64 +650,106 @@ SPAN_DECLARE(int) t42_itulab_to_jpeg(lab_params_t *s, tdata_t *dst, tsize_t *dst
     jpeg_destroy_decompress(&decompressor);
     jpeg_destroy_compress(&compressor);
     fclose(in);
-    fclose(out);
 
+#if defined(HAVE_OPEN_MEMSTREAM)
+    fclose(out);
     *dst = outptr;
     *dstlen = outsize;
+#else
+    *dstlen = ftell(out);
+    *dst = malloc(*dstlen);
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(out);
+        return FALSE;
+    }
+    if (fread(*dst, 1, *dstlen, out) != *dstlen)
+    {
+        free(*dst);
+        fclose(out);
+        return FALSE;
+    }    
+    fclose(out);
+#endif
 
     return TRUE;
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_jpeg_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, char *emsg, size_t max_emsg_bytes)
+SPAN_DECLARE(int) t42_jpeg_to_itulab(logging_state_t *logging, lab_params_t *s, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen)
 {
     struct jpeg_decompress_struct decompressor;
     struct jpeg_compress_struct compressor;
-    char *outptr;
-    size_t outsize;
     FILE *in;
     FILE *out;
     int m;
     JSAMPROW scan_line_in;
     JSAMPROW scan_line_out;
     escape_route_t escape;
+#if defined(HAVE_OPEN_MEMSTREAM)
+    char *outptr;
+    size_t outsize;
+#endif
 
     escape.error_message[0] = '\0';
-    emsg[0] = '\0';
 
 #if defined(HAVE_OPEN_MEMSTREAM)
-    in = fmemopen(src, srclen, "r");
-#else
-    in = tmpfile();
-    fwrite(src, 1, srclen, in);
-    rewind(in);
-#endif
-    if (in == NULL)
+    if ((in = fmemopen(src, srclen, "r")) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to fmemopen().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to fmemopen().\n");
         return FALSE;
     }
-
-#if defined(HAVE_OPEN_MEMSTREAM)
-    out = open_memstream(&outptr, &outsize);
-#else
-    out = tmpfile();
-#endif
-    if (out == NULL)
+    outsize = 0;
+    if ((out = open_memstream(&outptr, &outsize)) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to open_memstream().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to open_memstream().\n");
+        fclose(in);
         return FALSE;
     }
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(in);
+        fclose(out);
+        return FALSE;
+    }
+#else
+    if ((in = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        return FALSE;
+    }
+    if (fwrite(src, 1, srclen, in) != srclen)
+    {
+        fclose(in);
+        return FALSE;
+    }
+    if (fseek(in, 0, SEEK_SET) != 0)
+    {
+        fclose(in);
+        return FALSE;
+    }
+    if ((out = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        fclose(in);
+        return FALSE;
+    }
+#endif
+    scan_line_out = NULL;
 
     if (setjmp(escape.escape))
     {
-        strncpy(emsg, escape.error_message, max_emsg_bytes - 1);
-        emsg[max_emsg_bytes - 1] = '\0';
+        if (escape.error_message[0])
+            span_log(logging, SPAN_LOG_FLOW, "%s\n", escape.error_message);
+        else
+            span_log(logging, SPAN_LOG_FLOW, "Unspecified libjpeg error.\n");
+        if (scan_line_out)
+            free(scan_line_out);
+        fclose(in);
+        fclose(out);
         return FALSE;
     }
-
+    /* Create input decompressor. */
     decompressor.err = jpeg_std_error(&error_handler);
     decompressor.client_data = (void *) &escape;
     error_handler.error_exit = jpg_error_exit;
@@ -669,7 +769,7 @@ SPAN_DECLARE(int) t42_jpeg_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
     /* Take the header */
     jpeg_read_header(&decompressor, TRUE);
 
-    /* Now we can force the input colorspace. For ITULab, we will use YCbCr as a "don't touch" marker */
+    /* Now we can force the input colour space. For ITULab, we use YCbCr as a "don't touch" marker */
     decompressor.out_color_space = JCS_RGB;
 
     compressor.err = jpeg_std_error(&error_handler);
@@ -680,12 +780,13 @@ SPAN_DECLARE(int) t42_jpeg_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
     jpeg_create_compress(&compressor);
     jpeg_stdio_dest(&compressor, out);
 
-    /* Force the destination color space */
+    /* Force the destination colour space */
     compressor.in_color_space = JCS_YCbCr;
     compressor.input_components = 3;
 
     jpeg_set_defaults(&compressor);
-    //jpeg_set_quality(&compressor, quality, TRUE /* limit to baseline-JPEG values */);
+    /* Limit to baseline-JPEG values */
+    //jpeg_set_quality(&compressor, quality, TRUE);
 
     jpeg_copy_critical_parameters(&decompressor, &compressor);
 
@@ -697,7 +798,7 @@ SPAN_DECLARE(int) t42_jpeg_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
     jpeg_start_decompress(&decompressor);
     jpeg_start_compress(&compressor, TRUE);
 
-    SetITUFax(&compressor);
+    set_itu_fax(&compressor);
 
     if ((scan_line_in = (JSAMPROW) malloc(decompressor.output_width*decompressor.num_components)) == NULL)
         return FALSE;
@@ -722,45 +823,77 @@ SPAN_DECLARE(int) t42_jpeg_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
     jpeg_destroy_decompress(&decompressor);
     jpeg_destroy_compress(&compressor);
     fclose(in);
-    fclose(out);
 
+#if defined(HAVE_OPEN_MEMSTREAM)
+    fclose(out);
     *dst = outptr;
     *dstlen = outsize;
+#else
+    *dstlen = ftell(out);
+    *dst = malloc(*dstlen);
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(out);
+        return FALSE;
+    }
+    if (fread(*dst, 1, *dstlen, out) != *dstlen)
+    {
+        free(*dst);
+        fclose(out);
+        return FALSE;
+    }
+    fclose(out);
+#endif
 
     return TRUE;
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_srgb_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, uint32_t width, uint32_t height, char *emsg, size_t max_emsg_bytes)
+SPAN_DECLARE(int) t42_srgb_to_itulab(logging_state_t *logging, lab_params_t *s, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, uint32_t width, uint32_t height)
 {
     struct jpeg_compress_struct compressor;
     FILE *out;
-    char *outptr;
-    size_t outsize;
     JSAMPROW scan_line_out;
     JSAMPROW scan_line_in;
     tsize_t pos;
     escape_route_t escape;
+#if defined(HAVE_OPEN_MEMSTREAM)
+    char *outptr;
+    size_t outsize;
+#endif
 
     escape.error_message[0] = '\0';
-    emsg[0] = '\0';
 
 #if defined(HAVE_OPEN_MEMSTREAM)
-    out = open_memstream(&outptr, &outsize);
-#else
-    out = tmpfile();
-#endif
-    if (out == NULL)
+    outsize = 0;
+    if ((out = open_memstream(&outptr, &outsize)) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to open_memstream().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to open_memstream().\n");
         return FALSE;
     }
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(out);
+        return FALSE;
+    }
+#else
+    if ((out = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        return FALSE;
+    }
+#endif
+    scan_line_out = NULL;
 
     if (setjmp(escape.escape))
     {
-        strncpy(emsg, escape.error_message, max_emsg_bytes - 1);
-        emsg[max_emsg_bytes - 1] = '\0';
+        if (escape.error_message[0])
+            span_log(logging, SPAN_LOG_FLOW, "%s\n", escape.error_message);
+        else
+            span_log(logging, SPAN_LOG_FLOW, "Unspecified libjpeg error.\n");
+        if (scan_line_out)
+            free(scan_line_out);
+        fclose(out);
         return FALSE;
     }
 
@@ -772,12 +905,13 @@ SPAN_DECLARE(int) t42_srgb_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
     jpeg_create_compress(&compressor);
     jpeg_stdio_dest(&compressor, out);
 
-    /* Force the destination color space */
+    /* Force the destination colour space */
     compressor.in_color_space = JCS_YCbCr;
     compressor.input_components = 3;
 
     jpeg_set_defaults(&compressor);
-    //jpeg_set_quality(&compressor, quality, TRUE /* limit to baseline-JPEG values */);
+    /* Limit to baseline-JPEG values */
+    //jpeg_set_quality(&compressor, quality, TRUE);
 
     /* Size, resolution, etc */
     compressor.image_width = width;
@@ -785,14 +919,14 @@ SPAN_DECLARE(int) t42_srgb_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
 
     jpeg_start_compress(&compressor, TRUE);
 
-    SetITUFax(&compressor);
+    set_itu_fax(&compressor);
 
     if ((scan_line_out = (JSAMPROW) malloc(compressor.image_width*compressor.num_components)) == NULL)
         return FALSE;
 
     for (pos = 0;  pos < srclen;  pos += compressor.image_width*compressor.num_components)
     {
-        scan_line_in = src + pos;
+        scan_line_in = (JSAMPROW) src + pos;
         srgb_to_lab(s, scan_line_out, scan_line_in, compressor.image_width);
         jpeg_write_scanlines(&compressor, &scan_line_out, 1);
     }
@@ -800,44 +934,73 @@ SPAN_DECLARE(int) t42_srgb_to_itulab(lab_params_t *s, tdata_t *dst, tsize_t *dst
     free(scan_line_out);
     jpeg_finish_compress(&compressor);
     jpeg_destroy_compress(&compressor);
-    fclose(out);
 
+#if defined(HAVE_OPEN_MEMSTREAM)
+    fclose(out);
     *dst = outptr;
     *dstlen = outsize;
+#else
+    *dstlen = ftell(out);
+    *dst = malloc(*dstlen);
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(out);
+        return FALSE;
+    }
+    if (fread(*dst, 1, *dstlen, out) != *dstlen)
+    {
+        free(*dst);
+        fclose(out);
+        return FALSE;
+    }
+    fclose(out);
+#endif
 
     return TRUE;
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_itulab_to_itulab(tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, uint32_t width, uint32_t height, char *emsg, size_t max_emsg_bytes)
+SPAN_DECLARE(int) t42_itulab_to_itulab(logging_state_t *logging, tdata_t *dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, uint32_t width, uint32_t height)
 {
     struct jpeg_compress_struct compressor;
     FILE *out;
-    char *outptr;
-    size_t outsize;
     JSAMPROW scan_line_in;
     tsize_t pos;
     escape_route_t escape;
+#if defined(HAVE_OPEN_MEMSTREAM)
+    char *outptr;
+    size_t outsize;
+#endif
 
     escape.error_message[0] = '\0';
-    emsg[0] = '\0';
 
 #if defined(HAVE_OPEN_MEMSTREAM)
-    out = open_memstream(&outptr, &outsize);
-#else
-    out = tmpfile();
-#endif
-    if (out == NULL)
+    outsize = 0;
+    if ((out = open_memstream(&outptr, &outsize)) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to open_memstream().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to open_memstream().\n");
         return FALSE;
     }
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(out);
+        return FALSE;
+    }
+#else
+    if ((out = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        return FALSE;
+    }
+#endif
 
     if (setjmp(escape.escape))
     {
-        strncpy(emsg, escape.error_message, max_emsg_bytes - 1);
-        emsg[max_emsg_bytes - 1] = '\0';
+        if (escape.error_message[0])
+            span_log(logging, SPAN_LOG_FLOW, "%s\n", escape.error_message);
+        else
+            span_log(logging, SPAN_LOG_FLOW, "Unspecified libjpeg error.\n");
+        fclose(out);
         return FALSE;
     }
 
@@ -849,12 +1012,13 @@ SPAN_DECLARE(int) t42_itulab_to_itulab(tdata_t *dst, tsize_t *dstlen, tdata_t sr
     jpeg_create_compress(&compressor);
     jpeg_stdio_dest(&compressor, out);
 
-    /* Force the destination color space */
+    /* Force the destination colour space */
     compressor.in_color_space = JCS_YCbCr;
     compressor.input_components = 3;
 
     jpeg_set_defaults(&compressor);
-    //jpeg_set_quality(&compressor, quality, TRUE /* limit to baseline-JPEG values */);
+    /* Limit to baseline-JPEG values */
+    //jpeg_set_quality(&compressor, quality, TRUE);
 
     /* Size, resolution, etc */
     compressor.image_width = width;
@@ -862,26 +1026,43 @@ SPAN_DECLARE(int) t42_itulab_to_itulab(tdata_t *dst, tsize_t *dstlen, tdata_t sr
 
     jpeg_start_compress(&compressor, TRUE);
 
-    SetITUFax(&compressor);
+    set_itu_fax(&compressor);
 
     for (pos = 0;  pos < srclen;  pos += compressor.image_width*compressor.num_components)
     {
-        scan_line_in = src + pos;
+        scan_line_in = (JSAMPROW) src + pos;
         jpeg_write_scanlines(&compressor, &scan_line_in, 1);
     }
 
     jpeg_finish_compress(&compressor);
     jpeg_destroy_compress(&compressor);
-    fclose(out);
 
+#if defined(HAVE_OPEN_MEMSTREAM)
+    fclose(out);
     *dst = outptr;
     *dstlen = outsize;
+#else
+    *dstlen = ftell(out);
+    *dst = malloc(*dstlen);
+    if (fseek(out, 0, SEEK_SET) != 0)
+    {
+        fclose(out);
+        return FALSE;
+    }
+    if (fread(*dst, 1, *dstlen, out) != *dstlen)
+    {
+        free(*dst);
+        fclose(out);
+        return FALSE;
+    }        
+    fclose(out);
+#endif
 
     return TRUE;
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_itulab_to_srgb(lab_params_t *s, tdata_t dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, uint32_t *width, uint32_t *height, char *emsg, size_t max_emsg_bytes)
+SPAN_DECLARE(int) t42_itulab_to_srgb(logging_state_t *logging, lab_params_t *s, tdata_t dst, tsize_t *dstlen, tdata_t src, tsize_t srclen, uint32_t *width, uint32_t *height)
 {
     struct jpeg_decompress_struct decompressor;
     JSAMPROW scan_line_out;
@@ -892,28 +1073,41 @@ SPAN_DECLARE(int) t42_itulab_to_srgb(lab_params_t *s, tdata_t dst, tsize_t *dstl
     escape_route_t escape;
 
     escape.error_message[0] = '\0';
-    emsg[0] = '\0';
 
 #if defined(HAVE_OPEN_MEMSTREAM)
-    in = fmemopen(src, srclen, "r");
-#else
-    in = tmpfile();
-    fwrite(src, 1, srclen, in);
-    rewind(in);
-#endif
-    if (in == NULL)
+    if ((in = fmemopen(src, srclen, "r")) == NULL)
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Failed to fmemopen().");
+        span_log(logging, SPAN_LOG_FLOW, "Failed to fmemopen().\n");
         return FALSE;
     }
+#else
+    if ((in = tmpfile()) == NULL)
+    {
+        span_log(logging, SPAN_LOG_FLOW, "Failed to tmpfile().\n");
+        return FALSE;
+    }
+    if (fwrite(src, 1, srclen, in) != srclen)
+    {
+        fclose(in);
+        return FALSE;
+    }
+    if (fseek(in, 0, SEEK_SET) != 0)
+    {
+        fclose(in);
+        return FALSE;
+    }
+#endif
+    scan_line_out = NULL;
 
     if (setjmp(escape.escape))
     {
-        strncpy(emsg, escape.error_message, max_emsg_bytes - 1);
-        emsg[max_emsg_bytes - 1] = '\0';
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Unspecified libjpeg error.");
+        if (escape.error_message[0])
+            span_log(logging, SPAN_LOG_FLOW, "%s\n", escape.error_message);
+        else
+            span_log(logging, SPAN_LOG_FLOW, "Unspecified libjpeg error.\n");
+        if (scan_line_out)
+            free(scan_line_out);
+        fclose(in);
         return FALSE;
     }
     /* Create input decompressor. */
@@ -932,21 +1126,16 @@ SPAN_DECLARE(int) t42_itulab_to_srgb(lab_params_t *s, tdata_t dst, tsize_t *dstl
     /* Rewind the file */
     if (fseek(in, 0, SEEK_SET) != 0)
         return FALSE;
-printf("XXXX 10\n");
     /* Take the header */
     jpeg_read_header(&decompressor, FALSE);
-printf("XXXX 11\n");
-    /* Now we can force the input colorspace. For ITULab, we will use YCbCr as a "don't touch" marker */
+    /* Now we can force the input colour space. For ITULab, we use YCbCr as a "don't touch" marker */
     decompressor.out_color_space = JCS_YCbCr;
-printf("XXXX 12\n");
     /* Sanity check and parameter check */
-    if (!isITUfax(s, decompressor.marker_list))
+    if (!is_itu_fax(logging, s, decompressor.marker_list))
     {
-        if (emsg[0] == '\0')
-            strcpy(emsg, "Is not ITUFAX.");
-        //return FALSE;
+        span_log(logging, SPAN_LOG_FLOW, "Is not an ITU FAX.\n");
+        return FALSE;
     }
-printf("XXXX 13\n");
     /* Copy size, resolution, etc */
     *width = decompressor.image_width;
     *height = decompressor.image_height;
@@ -958,7 +1147,7 @@ printf("XXXX 13\n");
 
     for (pos = 0;  decompressor.output_scanline < decompressor.output_height;  pos += decompressor.output_width*decompressor.num_components)
     {
-        scan_line_out = dst + pos;
+        scan_line_out = (JSAMPROW) dst + pos;
         jpeg_read_scanlines(&decompressor, &scan_line_in, 1);
         lab_to_srgb(s, scan_line_out, scan_line_in, decompressor.output_width);
     }
@@ -1004,13 +1193,13 @@ SPAN_DECLARE(void) t42_encode_comment(t42_encode_state_t *s, const uint8_t comme
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_encode_get_byte(t42_encode_state_t *s)
+SPAN_DECLARE(int) t42_encode_image_complete(t42_encode_state_t *s)
 {
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_encode_get_chunk(t42_encode_state_t *s, uint8_t buf[], int max_len)
+SPAN_DECLARE(int) t42_encode_get(t42_encode_state_t *s, uint8_t buf[], size_t max_len)
 {
     return 0;
 }
@@ -1030,7 +1219,7 @@ SPAN_DECLARE(uint32_t) t42_encode_get_image_length(t42_encode_state_t *s)
 
 SPAN_DECLARE(int) t42_encode_get_compressed_image_size(t42_encode_state_t *s)
 {
-    return 0;
+    return s->compressed_image_size;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1042,8 +1231,17 @@ SPAN_DECLARE(int) t42_encode_set_row_read_handler(t42_encode_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(logging_state_t *) t42_encode_get_logging_state(t42_encode_state_t *s)
+{
+    return &s->logging;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) t42_encode_restart(t42_encode_state_t *s, uint32_t image_width, uint32_t image_length)
 {
+    //s->image_width = image_width;
+    //s->image_length = image_length;
+    s->compressed_image_size = 0;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1065,6 +1263,7 @@ SPAN_DECLARE(t42_encode_state_t *) t42_encode_init(t42_encode_state_t *s,
 
     s->row_read_handler = handler;
     s->row_read_user_data = user_data;
+    t42_encode_restart(s, image_width, image_length);
 
     return s;
 }
@@ -1078,7 +1277,11 @@ SPAN_DECLARE(int) t42_encode_release(t42_encode_state_t *s)
 
 SPAN_DECLARE(int) t42_encode_free(t42_encode_state_t *s)
 {
-    return 0;
+    int ret;
+
+    ret = t42_encode_release(s);
+    free(s);
+    return ret;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1087,16 +1290,19 @@ SPAN_DECLARE(void) t42_decode_rx_status(t42_decode_state_t *s, int status)
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t42_decode_put_byte(t42_decode_state_t *s, int byte)
+SPAN_DECLARE(int) t42_decode_put(t42_decode_state_t *s, const uint8_t data[], size_t len)
 {
-    return 0;
-}
-/*- End of function --------------------------------------------------------*/
+    uint8_t *buf;
 
-SPAN_DECLARE(int) t42_decode_put_chunk(t42_decode_state_t *s,
-                                       const uint8_t data[],
-                                       size_t len)
-{
+    if (s->compressed_image_size + len > s->buf_size)
+    {
+        if ((buf = (uint8_t *) realloc(s->compressed_buf, s->compressed_image_size + 1000)) == NULL)
+            return -1;
+        s->buf_size = s->compressed_image_size + 1000;
+        s->compressed_buf = buf;
+    }
+    memcpy(&s->compressed_buf[s->compressed_image_size], data, len);
+    s->compressed_image_size += len;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1105,6 +1311,8 @@ SPAN_DECLARE(int) t42_decode_set_row_write_handler(t42_decode_state_t *s,
                                                    t4_row_write_handler_t handler,
                                                    void *user_data)
 {
+    s->row_write_handler = handler;
+    s->row_write_user_data = user_data;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1114,6 +1322,9 @@ SPAN_DECLARE(int) t42_decode_set_comment_handler(t42_decode_state_t *s,
                                                  t4_row_write_handler_t handler,
                                                  void *user_data)
 {
+    s->max_comment_len = max_comment_len;
+    s->comment_handler = handler;
+    s->comment_user_data = user_data;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1140,7 +1351,7 @@ SPAN_DECLARE(uint32_t) t42_decode_get_image_length(t42_decode_state_t *s)
 
 SPAN_DECLARE(int) t42_decode_get_compressed_image_size(t42_decode_state_t *s)
 {
-    return 0;
+    return s->compressed_image_size;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1150,8 +1361,15 @@ SPAN_DECLARE(int) t42_decode_new_plane(t42_decode_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(logging_state_t *) t42_decode_get_logging_state(t42_decode_state_t *s)
+{
+    return &s->logging;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) t42_decode_restart(t42_decode_state_t *s)
 {
+    s->compressed_image_size = 0;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1171,6 +1389,11 @@ SPAN_DECLARE(t42_decode_state_t *) t42_decode_init(t42_decode_state_t *s,
 
     s->row_write_handler = handler;
     s->row_write_user_data = user_data;
+
+    s->buf_size = 0;
+    s->compressed_buf = NULL;
+
+    t42_decode_restart(s);
 
     return s;
 }

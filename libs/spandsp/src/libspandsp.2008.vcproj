@@ -45,7 +45,7 @@
 			<Tool
 				Name="VCCLCompilerTool"
 				Optimization="0"
-				AdditionalIncludeDirectories=".;..\..\src\spandsp;..\..\src;..\..\src\msvc;.\spandsp;.\msvc;..\..\tiff-3.8.2\libtiff"
+				AdditionalIncludeDirectories=".;..\..\src\spandsp;..\..\src;..\..\src\msvc;.\spandsp;.\msvc;&quot;..\..\tiff-4.0.2\libtiff&quot;;&quot;..\..\jpeg-8d&quot;"
 				PreprocessorDefinitions="WIN32;_DEBUG;_WINDOWS;_USRDLL;LIBSPANDSP_EXPORTS;_CRT_SECURE_NO_DEPRECATE;_CRT_NONSTDC_NO_DEPRECATE;HAVE_CONFIG_H"
 				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
@@ -124,7 +124,7 @@
 			<Tool
 				Name="VCCLCompilerTool"
 				Optimization="0"
-				AdditionalIncludeDirectories=".;.\spandsp;.\msvc;..\..\tiff-3.8.2\libtiff"
+				AdditionalIncludeDirectories=".;.\spandsp;.\msvc;..\..\tiff-4.0.2\libtiff;..\..\jpeg-8d"
 				PreprocessorDefinitions="WIN32;_DEBUG;_WINDOWS;_USRDLL;LIBSPANDSP_EXPORTS;_CRT_SECURE_NO_DEPRECATE;_CRT_NONSTDC_NO_DEPRECATE;HAVE_CONFIG_H"
 				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
@@ -203,7 +203,7 @@
 			/>
 			<Tool
 				Name="VCCLCompilerTool"
-				AdditionalIncludeDirectories=".;.\spandsp;.\msvc;..\..\tiff-3.8.2\libtiff"
+				AdditionalIncludeDirectories=".;.\spandsp;.\msvc;..\..\tiff-4.0.2\libtiff;..\..\jpeg-8d"
 				PreprocessorDefinitions="WIN32;NDEBUG;_WINDOWS;_USRDLL;LIBSPANDSP_EXPORTS;_CRT_SECURE_NO_DEPRECATE;_CRT_NONSTDC_NO_DEPRECATE;HAVE_CONFIG_H"
 				RuntimeLibrary="2"
 				UsePrecompiledHeader="0"
@@ -281,7 +281,7 @@
 			/>
 			<Tool
 				Name="VCCLCompilerTool"
-				AdditionalIncludeDirectories=".;.\spandsp;.\msvc;..\..\tiff-3.8.2\libtiff"
+				AdditionalIncludeDirectories=".;.\spandsp;.\msvc;..\..\tiff-4.0.2\libtiff;..\..\jpeg-8d"
 				PreprocessorDefinitions="WIN32;NDEBUG;_WINDOWS;_USRDLL;LIBSPANDSP_EXPORTS;_CRT_SECURE_NO_DEPRECATE;_CRT_NONSTDC_NO_DEPRECATE;HAVE_CONFIG_H"
 				RuntimeLibrary="2"
 				UsePrecompiledHeader="0"
@@ -471,6 +471,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\image_translate.c"
+				>
+			</File>
+			<File
 				RelativePath="logging.c"
 				>
 			</File>
@@ -587,6 +591,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\t42.c"
+				>
+			</File>
+			<File
 				RelativePath="t4_rx.c"
 				>
 			</File>
@@ -694,6 +702,14 @@
 		<Filter
 			Name="Header Files"
 			>
+			<File
+				RelativePath=".\spandsp\private\image_translate.h"
+				>
+			</File>
+			<File
+				RelativePath=".\spandsp\image_translate.h"
+				>
+			</File>
 			<File
 				RelativePath="spandsp.h"
 				>
@@ -1243,19 +1259,19 @@
 				>
 			</File>
 			<File
-				RelativePath=".\spandsp\private\t42.h"
-				>
-			</File>
-			<File
 				RelativePath=".\spandsp\t42.h"
 				>
 			</File>
 			<File
-				RelativePath=".\spandsp\private\t81_t82_arith_coding.h"
+				RelativePath=".\spandsp\private\t42.h"
 				>
 			</File>
 			<File
 				RelativePath=".\spandsp\t81_t82_arith_coding.h"
+				>
+			</File>
+			<File
+				RelativePath=".\spandsp\private\t81_t82_arith_coding.h"
 				>
 			</File>
 			<File

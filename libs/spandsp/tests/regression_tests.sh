@@ -499,7 +499,23 @@ fi
 echo t38_non_ecm_buffer_tests completed OK
 
 rm -f t4_tests_receive.tif
-./t4_tests >$STDOUT_DEST 2>$STDERR_DEST
+./t4_tests -b 0 >$STDOUT_DEST 2>$STDERR_DEST
+RETVAL=$?
+if [ $RETVAL != 0 ]
+then
+    echo t4_tests failed!
+    exit $RETVAL
+fi
+rm -f t4_tests_receive.tif
+./t4_tests -b 1 >$STDOUT_DEST 2>$STDERR_DEST
+RETVAL=$?
+if [ $RETVAL != 0 ]
+then
+    echo t4_tests failed!
+    exit $RETVAL
+fi
+rm -f t4_tests_receive.tif
+./t4_tests -b 10 >$STDOUT_DEST 2>$STDERR_DEST
 RETVAL=$?
 if [ $RETVAL != 0 ]
 then

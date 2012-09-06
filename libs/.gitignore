@@ -13,10 +13,15 @@ libtool
 ltmain.sh
 missing
 
+ptlib
+opal
+
 *_manifest.rc
 *.pc
 
 /*.tar.*
+
+/*/*.dSYM/
 
 /apr/apr-1-config
 /apr/apr.exp
@@ -578,6 +583,7 @@ missing
 /spandsp/test-data/Makefile.in
 /spandsp/tests/Makefile
 /spandsp/tests/Makefile.in
+/spandsp/src/make_cielab_luts
 /speex/config.h
 /speex/include/Makefile
 /speex/include/Makefile.in
@@ -880,6 +886,7 @@ missing
 /yaml/tests/run-parser
 /yaml/tests/run-scanner
 /zeromq-*/
+/jpeg-8d/
 
 # build products we should remove
 !/apr-util/xml/expat/conftools/config.guess

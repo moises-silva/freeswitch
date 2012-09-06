@@ -588,7 +588,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG, "BRIDGE THREAD DONE [%s]\n", switch_channel_get_name(chan_a));
 	switch_channel_clear_flag(chan_a, CF_BRIDGED);
 
-	if (switch_channel_test_flag(chan_a, CF_LEG_HOLDING) && switch_channel_ready(chan_b)) {
+	if (switch_channel_test_flag(chan_a, CF_LEG_HOLDING) && switch_channel_ready(chan_b) && switch_channel_get_state(chan_b) != CS_PARK) {
 		const char *ext = switch_channel_get_variable(chan_a, "hold_hangup_xfer_exten");
 
 		switch_channel_stop_broadcast(chan_b);
@@ -761,7 +761,7 @@ static switch_status_t uuid_bridge_on_hibernate(switch_core_session_t *session)
 static switch_status_t uuid_bridge_on_soft_execute(switch_core_session_t *session)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
-	switch_core_session_t *other_session;
+	switch_core_session_t *other_session = NULL;
 	const char *other_uuid = NULL;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s CUSTOM SOFT_EXECUTE\n", switch_channel_get_name(channel));
@@ -818,7 +818,6 @@ static switch_status_t uuid_bridge_on_soft_execute(switch_core_session_t *sessio
 		switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 
 		if (switch_ivr_wait_for_answer(session, other_session) != SWITCH_STATUS_SUCCESS) {
-			switch_core_session_rwunlock(other_session);
 			if (switch_true(switch_channel_get_variable(channel, "uuid_bridge_continue_on_cancel"))) {
 				switch_channel_set_state(channel, CS_EXECUTE);
 			} else if (!switch_channel_test_flag(channel, CF_TRANSFER)) {
@@ -843,7 +842,6 @@ static switch_status_t uuid_bridge_on_soft_execute(switch_core_session_t *sessio
 					switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				}
 			}
-			switch_core_session_rwunlock(other_session);
 			goto done;
 		}
 
@@ -869,12 +867,16 @@ static switch_status_t uuid_bridge_on_soft_execute(switch_core_session_t *sessio
 			!switch_channel_test_flag(channel, CF_REDIRECT) && state < CS_HANGUP && state != CS_ROUTING && state != CS_PARK) {
 			switch_channel_set_state(channel, CS_EXECUTE);
 		}
-		switch_core_session_rwunlock(other_session);
 	} else {
 		switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 	}
 
  done:
+
+	if (other_session) {
+		switch_core_session_rwunlock(other_session);
+		other_session = NULL;
+	}
 
 	switch_channel_clear_flag_recursive(channel, CF_BRIDGE_ORIGINATOR);
 

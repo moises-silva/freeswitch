@@ -342,6 +342,7 @@ static switch_status_t interface_exists(char *the_interface)
 static switch_status_t remove_interface(char *the_interface)
 {
 	int x = 10;
+	int fd;
 #ifdef WIN32
 	switch_size_t howmany = 8;
 #else
@@ -389,6 +390,8 @@ static switch_status_t remove_interface(char *the_interface)
 		DEBUGA_GSMOPEN("interface '%s' is busy\n", GSMOPEN_P_LOG, the_interface);
 		goto end;
 	}
+
+        LOKKA(tech_pvt->controldev_lock);
 
 	globals.GSMOPEN_INTERFACES[interface_id].running = 0;
 
@@ -441,6 +444,36 @@ static switch_status_t remove_interface(char *the_interface)
 		switch_thread_join(&status, globals.GSMOPEN_INTERFACES[interface_id].gsmopen_api_thread);
 	}
 
+	fd = tech_pvt->controldevfd;
+	//DEBUGA_GSMOPEN("SHUTDOWN tech_pvt->controldevfd=%d\n", GSMOPEN_P_LOG, tech_pvt->controldevfd);
+	if (fd) {
+		//close(fd);
+		tech_pvt->controldevfd = -1;
+		DEBUGA_GSMOPEN("SHUTDOWN tech_pvt->controldevfd=%d\n", GSMOPEN_P_LOG, tech_pvt->controldevfd);
+	}
+
+	serial_audio_shutdown(tech_pvt);
+
+	int res;
+	res = tech_pvt->serialPort_serial_control->Close();
+	DEBUGA_GSMOPEN("serial_shutdown res=%d (controldevfd is %d)\n", GSMOPEN_P_LOG, res, tech_pvt->controldevfd);
+
+#ifndef WIN32
+	shutdown(tech_pvt->audiogsmopenpipe[0], 2);
+	close(tech_pvt->audiogsmopenpipe[0]);
+	shutdown(tech_pvt->audiogsmopenpipe[1], 2);
+	close(tech_pvt->audiogsmopenpipe[1]);
+	shutdown(tech_pvt->audiopipe[0], 2);
+	close(tech_pvt->audiopipe[0]);
+	shutdown(tech_pvt->audiopipe[1], 2);
+	close(tech_pvt->audiopipe[1]);
+	shutdown(tech_pvt->GSMopenHandles.fdesc[0], 2);
+	close(tech_pvt->GSMopenHandles.fdesc[0]);
+	shutdown(tech_pvt->GSMopenHandles.fdesc[1], 2);
+	close(tech_pvt->GSMopenHandles.fdesc[1]);
+#endif /* WIN32 */
+
+        UNLOCKA(tech_pvt->controldev_lock);
 	switch_mutex_lock(globals.mutex);
 	if (globals.gsm_console == &globals.GSMOPEN_INTERFACES[interface_id]) {
 		DEBUGA_GSMOPEN("interface '%s' no more console\n", GSMOPEN_P_LOG, the_interface);
@@ -454,6 +487,7 @@ static switch_status_t remove_interface(char *the_interface)
 
 	DEBUGA_GSMOPEN("interface '%s' deleted successfully\n", GSMOPEN_P_LOG, the_interface);
 	globals.GSMOPEN_INTERFACES[interface_id].running = 1;
+
   end:
 	//running = 1;
 	return SWITCH_STATUS_SUCCESS;
@@ -2258,31 +2292,45 @@ SWITCH_STANDARD_API(gsm_function)
 
 	if (!strcasecmp(argv[0], "list")) {
 		int i;
+		unsigned int ib = 0;
+		unsigned int ib_failed = 0;
+		unsigned int ob = 0;
+		unsigned int ob_failed = 0;
 		char next_flag_char = ' ';
 
 		stream->write_function(stream, "F ID\t    Name    \tIB (F/T)    OB (F/T)\tState\tCallFlw\t\tUUID\n");
 		stream->write_function(stream, "= ====\t  ========  \t=======     =======\t======\t============\t======\n");
 
 		for (i = 0; i < GSMOPEN_MAX_INTERFACES; i++) {
-			next_flag_char = i == globals.next_interface ? '*' : ' ';
 
 			if (strlen(globals.GSMOPEN_INTERFACES[i].name)) {
+				next_flag_char = i == globals.next_interface ? '*' : ' ';
+				ib += globals.GSMOPEN_INTERFACES[i].ib_calls;
+				ib_failed += globals.GSMOPEN_INTERFACES[i].ib_failed_calls;
+				ob += globals.GSMOPEN_INTERFACES[i].ob_calls;
+				ob_failed += globals.GSMOPEN_INTERFACES[i].ob_failed_calls;
+
+
 				stream->write_function(stream,
-									   "%c %d\t[%s]\t%3ld/%ld\t%6ld/%ld\t%s\t%s\t%s\n",
-									   next_flag_char,
-									   i, globals.GSMOPEN_INTERFACES[i].name,
-									   globals.GSMOPEN_INTERFACES[i].ib_failed_calls,
-									   globals.GSMOPEN_INTERFACES[i].ib_calls,
-									   globals.GSMOPEN_INTERFACES[i].ob_failed_calls,
-									   globals.GSMOPEN_INTERFACES[i].ob_calls,
-									   interface_status[globals.GSMOPEN_INTERFACES[i].interface_state],
-									   phone_callflow[globals.GSMOPEN_INTERFACES[i].phone_callflow], globals.GSMOPEN_INTERFACES[i].session_uuid_str);
+						//"%c %d\t[%s]\t%3ld/%ld\t%6ld/%ld\t%s\t%s\t%s\n",
+						"%c %d\t[%6s]\t%3u/%u\t%6u/%u\t%s\t%s\t%s\n",
+						next_flag_char,
+						i, globals.GSMOPEN_INTERFACES[i].name,
+						globals.GSMOPEN_INTERFACES[i].ib_failed_calls,
+						globals.GSMOPEN_INTERFACES[i].ib_calls,
+						globals.GSMOPEN_INTERFACES[i].ob_failed_calls,
+						globals.GSMOPEN_INTERFACES[i].ob_calls,
+						interface_status[globals.GSMOPEN_INTERFACES[i].interface_state],
+						phone_callflow[globals.GSMOPEN_INTERFACES[i].phone_callflow], globals.GSMOPEN_INTERFACES[i].session_uuid_str);
 			} else if (argc > 1 && !strcasecmp(argv[1], "full")) {
-				stream->write_function(stream, "%c\t%d\n", next_flag_char, i);
+				stream->write_function(stream, "%c %d\n", next_flag_char, i);
+				//stream->write_function(stream, "%c\t%d\n", next_flag_char, i);
 			}
 
 		}
-		stream->write_function(stream, "\nTotal: %d\n", globals.real_interfaces - 1);
+		//stream->write_function(stream, "\nTotal: %d\n", globals.real_interfaces - 1);
+		stream->write_function(stream, "\nTotal Interfaces: %d  IB Calls(Failed/Total): %u/%u  OB Calls(Failed/Total): %u/%u\n",
+							   globals.real_interfaces > 0 ? globals.real_interfaces - 1 : 0, ib_failed, ib, ob_failed, ob);
 
 	} else if (!strcasecmp(argv[0], "console")) {
 		int i;

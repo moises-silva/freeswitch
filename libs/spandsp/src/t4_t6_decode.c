@@ -85,11 +85,10 @@
 #include "spandsp/timezone.h"
 #include "spandsp/t4_rx.h"
 #include "spandsp/t4_tx.h"
+#include "spandsp/image_translate.h"
 #include "spandsp/t81_t82_arith_coding.h"
 #include "spandsp/t85.h"
-#if defined(SPANDSP_SUPPORT_T42)
 #include "spandsp/t42.h"
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
 #include "spandsp/t43.h"
 #endif
@@ -99,14 +98,13 @@
 #include "spandsp/private/logging.h"
 #include "spandsp/private/t81_t82_arith_coding.h"
 #include "spandsp/private/t85.h"
-#if defined(SPANDSP_SUPPORT_T42)
 #include "spandsp/private/t42.h"
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
 #include "spandsp/private/t43.h"
 #endif
 #include "spandsp/private/t4_t6_decode.h"
 #include "spandsp/private/t4_t6_encode.h"
+#include "spandsp/private/image_translate.h"
 #include "spandsp/private/t4_rx.h"
 #include "spandsp/private/t4_tx.h"
 
@@ -702,6 +700,36 @@ static void t4_t6_decode_rx_status(t4_t6_decode_state_t *s, int status)
         break;
     case SIG_STATUS_CARRIER_DOWN:
     case SIG_STATUS_END_OF_DATA:
+        t4_t6_decode_put(s, NULL, 0);
+        break;
+    default:
+        span_log(&s->logging, SPAN_LOG_WARNING, "Unexpected rx status - %d!\n", status);
+        break;
+    }
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) t4_t6_decode_put_bit(t4_t6_decode_state_t *s, int bit)
+{
+    if (bit < 0)
+    {
+        t4_t6_decode_rx_status(s, bit);
+        return TRUE;
+    }
+    s->compressed_image_size++;
+    if (put_bits(s, bit & 1, 1))
+        return T4_DECODE_OK;
+    return T4_DECODE_MORE_DATA;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) t4_t6_decode_put(t4_t6_decode_state_t *s, const uint8_t buf[], size_t len)
+{
+    int i;
+    uint8_t byte;
+
+    if (len == 0)
+    {
         /* Finalise the image */
         if (s->consecutive_eols != EOLS_TO_END_ANY_RX_PAGE)
         {
@@ -722,51 +750,17 @@ static void t4_t6_decode_rx_status(t4_t6_decode_state_t *s, int status)
         s->rx_skip_bits = 0;
         s->rx_bitstream = 0;
         s->consecutive_eols = EOLS_TO_END_ANY_RX_PAGE;
-        break;
-    default:
-        span_log(&s->logging, SPAN_LOG_WARNING, "Unexpected rx status - %d!\n", status);
-        break;
+        return T4_DECODE_OK;
     }
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(int) t4_t6_decode_put_bit(t4_t6_decode_state_t *s, int bit)
-{
-    if (bit < 0)
-    {
-        t4_t6_decode_rx_status(s, bit);
-        return TRUE;
-    }
-    s->compressed_image_size++;
-    return put_bits(s, bit & 1, 1);
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(int) t4_t6_decode_put_byte(t4_t6_decode_state_t *s, int byte)
-{
-    if (byte < 0)
-    {
-        t4_t6_decode_rx_status(s, byte);
-        return TRUE;
-    }
-    s->compressed_image_size += 8;
-    return put_bits(s, byte & 0xFF, 8);
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(int) t4_t6_decode_put_chunk(t4_t6_decode_state_t *s, const uint8_t buf[], int len)
-{
-    int i;
-    uint8_t byte;
 
     for (i = 0;  i < len;  i++)
     {
         s->compressed_image_size += 8;
         byte = buf[i];
         if (put_bits(s, byte & 0xFF, 8))
-            return TRUE;
+            return T4_DECODE_OK;
     }
-    return FALSE;
+    return T4_DECODE_MORE_DATA;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -875,10 +869,7 @@ SPAN_DECLARE(int) t4_t6_decode_restart(t4_t6_decode_state_t *s, int image_width)
     if (s->ref_runs)
     {
         memset(s->ref_runs, 0, run_space);
-        s->ref_runs[0] =
-        s->ref_runs[1] =
-        s->ref_runs[2] =
-        s->ref_runs[3] = s->image_width;
+        s->ref_runs[0] = s->image_width;
     }
     if (s->row_buf)
         memset(s->row_buf, 0, s->bytes_per_row);

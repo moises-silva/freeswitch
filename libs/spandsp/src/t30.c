@@ -61,11 +61,10 @@
 #include "spandsp/timezone.h"
 #include "spandsp/t4_rx.h"
 #include "spandsp/t4_tx.h"
+#include "spandsp/image_translate.h"
 #include "spandsp/t81_t82_arith_coding.h"
 #include "spandsp/t85.h"
-#if defined(SPANDSP_SUPPORT_T42)
 #include "spandsp/t42.h"
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
 #include "spandsp/t43.h"
 #endif
@@ -81,14 +80,13 @@
 #include "spandsp/private/timezone.h"
 #include "spandsp/private/t81_t82_arith_coding.h"
 #include "spandsp/private/t85.h"
-#if defined(SPANDSP_SUPPORT_T42)
 #include "spandsp/private/t42.h"
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
 #include "spandsp/private/t43.h"
 #endif
 #include "spandsp/private/t4_t6_decode.h"
 #include "spandsp/private/t4_t6_encode.h"
+#include "spandsp/private/image_translate.h"
 #include "spandsp/private/t4_rx.h"
 #include "spandsp/private/t4_tx.h"
 #include "spandsp/private/t30.h"
@@ -731,7 +729,7 @@ static int get_partial_ecm_page(t30_state_t *s)
         /* These frames contain a frame sequence number within the partial page (one octet) followed
            by some image data. */
         s->ecm_data[i][3] = (uint8_t) i;
-        if ((len = t4_tx_get_chunk(&s->t4.tx, &s->ecm_data[i][4], s->octets_per_ecm_frame)) < s->octets_per_ecm_frame)
+        if ((len = t4_tx_get(&s->t4.tx, &s->ecm_data[i][4], s->octets_per_ecm_frame)) < s->octets_per_ecm_frame)
         {
             /* The image is not big enough to fill the entire buffer */
             /* We need to pad to a full frame, as most receivers expect that. */
@@ -750,7 +748,7 @@ static int get_partial_ecm_page(t30_state_t *s)
     /* We filled the entire buffer */
     s->ecm_frames = 256;
     span_log(&s->logging, SPAN_LOG_FLOW, "Partial page buffer full (%d per frame)\n", s->octets_per_ecm_frame);
-    s->ecm_at_page_end = ((t4_tx_check_bit(&s->t4.tx) & 2) != 0);
+    s->ecm_at_page_end = (t4_tx_image_complete(&s->t4.tx) == SIG_STATUS_END_OF_DATA);
     return 256;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1179,9 +1177,11 @@ int t30_build_dis_or_dtc(t30_state_t *s)
             set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_SYCC_T81_CAPABLE);
         if ((s->supported_compressions & T30_SUPPORT_T85_COMPRESSION))
         {
-            set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_T85_CAPABLE);
+            /* Bit 79 set with bit 78 clear is invalid, so only check for L0
+               support here. */
             if ((s->supported_compressions & T30_SUPPORT_T85_L0_COMPRESSION))
                 set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_T85_L0_CAPABLE);
+            set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_T85_CAPABLE);
         }
         //if ((s->supported_compressions & T30_SUPPORT_T89_COMPRESSION))
         //    set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_T89_CAPABLE);
@@ -1332,26 +1332,22 @@ static int build_dcs(t30_state_t *s)
     /* Select the compression to use. */
     switch (s->line_encoding)
     {
-#if defined(SPANDSP_SUPPORT_T42)
     case T4_COMPRESSION_ITU_T42:
         set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_FULL_COLOUR_MODE);
         set_ctrl_bits(s->dcs_frame, T30_MIN_SCAN_0MS, 21);
         break;
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
     case T4_COMPRESSION_ITU_T43:
         set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_T43_MODE);
         set_ctrl_bits(s->dcs_frame, T30_MIN_SCAN_0MS, 21);
         break;
 #endif
-    case T4_COMPRESSION_ITU_T85:
-        set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_T85_MODE);
-        clr_ctrl_bit(s->dcs_frame, T30_DCS_BIT_T85_L0_MODE);
+    case T4_COMPRESSION_ITU_T85_L0:
+        set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_T85_L0_MODE);
         set_ctrl_bits(s->dcs_frame, T30_MIN_SCAN_0MS, 21);
         break;
-    case T4_COMPRESSION_ITU_T85_L0:
+    case T4_COMPRESSION_ITU_T85:
         set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_T85_MODE);
-        set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_T85_L0_MODE);
         set_ctrl_bits(s->dcs_frame, T30_MIN_SCAN_0MS, 21);
         break;
     case T4_COMPRESSION_ITU_T6:
@@ -1972,8 +1968,6 @@ static int start_sending_document(t30_state_t *s)
     if (s->use_own_tz)
         t4_tx_set_header_tz(&s->t4.tx, &s->tz);
 
-    s->x_resolution = t4_tx_get_x_resolution(&s->t4.tx);
-    s->y_resolution = t4_tx_get_y_resolution(&s->t4.tx);
     /* The minimum scan time to be used can't be evaluated until we know the Y resolution, and
        must be evaluated before the minimum scan row bits can be evaluated. */
     if ((min_row_bits = set_min_scan_time_code(s)) < 0)
@@ -1986,6 +1980,8 @@ static int start_sending_document(t30_state_t *s)
 
     if (tx_start_page(s))
         return -1;
+    s->x_resolution = t4_tx_get_x_resolution(&s->t4.tx);
+    s->y_resolution = t4_tx_get_y_resolution(&s->t4.tx);
     s->image_width = t4_tx_get_image_width(&s->t4.tx);
     if (s->error_correcting_mode)
     {
@@ -2070,41 +2066,61 @@ static int process_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
     s->error_correcting_mode = (s->ecm_allowed  &&  (s->far_dis_dtc_frame[6] & DISBIT3) != 0);
     /* 256 octets per ECM frame */
     s->octets_per_ecm_frame = 256;
-    /* Select the compression to use. */
-    if (s->error_correcting_mode
-        &&
-        (s->supported_compressions & T30_SUPPORT_T85_COMPRESSION)
-        &&
-        test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T85_CAPABLE))
+    /* Now we know if we are going to use ECM, select the compression to use. */
+    if (!s->error_correcting_mode)
     {
-        if (s->supported_compressions & T30_SUPPORT_T85_L0_COMPRESSION
+        /* Without error correction our choices are very limited */
+        if ((s->supported_compressions & T30_SUPPORT_T4_2D_COMPRESSION)
             &&
-            test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T85_L0_CAPABLE))
+            test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_2D_CAPABLE))
+        {
+            s->line_encoding = T4_COMPRESSION_ITU_T4_2D;
+        }
+        else
+        {
+            s->line_encoding = T4_COMPRESSION_ITU_T4_1D;
+        }
+    }
+    else
+    {
+#if defined(SPANDSP_SUPPORT_T42x)  ||  defined(SPANDSP_SUPPORT_T43)
+        /* With error correction colour may be possible/required */
+        if ((0 & (T30_SUPPORT_T43_COMPRESSION | T30_SUPPORT_T45_COMPRESSION | T30_SUPPORT_T81_COMPRESSION | T30_SUPPORT_SYCC_T81_COMPRESSION)))
         {
             s->line_encoding = T4_COMPRESSION_ITU_T85_L0;
         }
         else
+#endif
         {
-            s->line_encoding = T4_COMPRESSION_ITU_T85;
+            if ((s->supported_compressions & T30_SUPPORT_T85_L0_COMPRESSION)
+                &&
+                test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T85_L0_CAPABLE))
+            {
+                s->line_encoding = T4_COMPRESSION_ITU_T85_L0;
+            }
+            else if ((s->supported_compressions & T30_SUPPORT_T85_COMPRESSION)
+                     &&
+                     test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T85_CAPABLE))
+            {
+                s->line_encoding = T4_COMPRESSION_ITU_T85;
+            }
+            else if ((s->supported_compressions & T30_SUPPORT_T6_COMPRESSION)
+                     &&
+                     test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T6_CAPABLE))
+            {
+                s->line_encoding = T4_COMPRESSION_ITU_T6;
+            }
+            else if ((s->supported_compressions & T30_SUPPORT_T4_2D_COMPRESSION)
+                     &&
+                     test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_2D_CAPABLE))
+            {
+                s->line_encoding = T4_COMPRESSION_ITU_T4_2D;
+            }
+            else
+            {
+                s->line_encoding = T4_COMPRESSION_ITU_T4_1D;
+            }
         }
-    }
-    else if (s->error_correcting_mode
-             &&
-             (s->supported_compressions & T30_SUPPORT_T6_COMPRESSION)
-             &&
-             test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T6_CAPABLE))
-    {
-        s->line_encoding = T4_COMPRESSION_ITU_T6;
-    }
-    else if ((s->supported_compressions & T30_SUPPORT_T4_2D_COMPRESSION)
-             &&
-             test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_2D_CAPABLE))
-    {
-        s->line_encoding = T4_COMPRESSION_ITU_T4_2D;
-    }
-    else
-    {
-        s->line_encoding = T4_COMPRESSION_ITU_T4_1D;
     }
     span_log(&s->logging, SPAN_LOG_FLOW, "Selected compression %s (%d)\n", t4_encoding_to_str(s->line_encoding), s->line_encoding);
     switch (s->far_dis_dtc_frame[4] & (DISBIT6 | DISBIT5 | DISBIT4 | DISBIT3))
@@ -2359,13 +2375,28 @@ static int process_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
 
     s->image_width = widths[i][dcs_frame[5] & (DISBIT2 | DISBIT1)];
 
-    /* Check which compression we will use. */
-    if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_T85_MODE))
+    /* Check which compression the far end has decided to use. */
+#if defined(SPANDSP_SUPPORT_T42)
+    if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_FULL_COLOUR_MODE))
     {
-        if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_T85_L0_MODE))
-            s->line_encoding = T4_COMPRESSION_ITU_T85_L0;
-        else
-            s->line_encoding = T4_COMPRESSION_ITU_T85;
+        s->line_encoding = T4_COMPRESSION_ITU_T42;
+    }
+    else
+#endif
+#if defined(SPANDSP_SUPPORT_T43)
+    if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_T43_MODE))
+    {
+        s->line_encoding = T4_COMPRESSION_ITU_T43;
+    }
+    else
+#endif
+    if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_T85_L0_MODE))
+    {
+        s->line_encoding = T4_COMPRESSION_ITU_T85_L0;
+    }
+    else if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_T85_MODE))
+    {
+        s->line_encoding = T4_COMPRESSION_ITU_T85;
     }
     else if (test_ctrl_bit(dcs_frame, T30_DCS_BIT_T6_MODE))
     {
@@ -2605,7 +2636,7 @@ static int process_rx_pps(t30_state_t *s, const uint8_t *msg, int len)
         span_log(&s->logging, SPAN_LOG_FLOW, "Partial page OK - committing block %d, %d frames\n", s->ecm_block, s->ecm_frames);
         for (i = 0;  i < s->ecm_frames;  i++)
         {
-            if (t4_rx_put_chunk(&s->t4.rx, s->ecm_data[i], s->ecm_len[i]))
+            if (t4_rx_put(&s->t4.rx, s->ecm_data[i], s->ecm_len[i]))
             {
                 /* This is the end of the document */
                 break;
@@ -5442,7 +5473,7 @@ SPAN_DECLARE_NONSTD(void) t30_non_ecm_put_bit(void *user_data, int bit)
         break;
     case T30_STATE_F_DOC_NON_ECM:
         /* Document transfer */
-        if (t4_rx_put_bit(&s->t4.rx, bit))
+        if (t4_rx_put_bit(&s->t4.rx, bit) == T4_DECODE_OK)
         {
             /* That is the end of the document */
             set_state(s, T30_STATE_F_POST_DOC_NON_ECM);
@@ -5454,48 +5485,7 @@ SPAN_DECLARE_NONSTD(void) t30_non_ecm_put_bit(void *user_data, int bit)
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(void) t30_non_ecm_put_byte(void *user_data, int byte)
-{
-    t30_state_t *s;
-
-    if (byte < 0)
-    {
-        t30_non_ecm_rx_status(user_data, byte);
-        return;
-    }
-    s = (t30_state_t *) user_data;
-    switch (s->state)
-    {
-    case T30_STATE_F_TCF:
-        /* Trainability test */
-        /* This makes counting zeros fast, but approximate. That really doesn't matter */
-        s->tcf_test_bits += 8;
-        if (byte)
-        {
-            if (s->tcf_current_zeros > s->tcf_most_zeros)
-                s->tcf_most_zeros = s->tcf_current_zeros;
-            s->tcf_current_zeros = 0;
-        }
-        else
-        {
-            s->tcf_current_zeros += 8;
-        }
-        break;
-    case T30_STATE_F_DOC_NON_ECM:
-        /* Document transfer */
-        if (t4_rx_put_byte(&s->t4.rx, (uint8_t) byte))
-        {
-            /* That is the end of the document */
-            set_state(s, T30_STATE_F_POST_DOC_NON_ECM);
-            queue_phase(s, T30_PHASE_D_RX);
-            timer_t2_start(s);
-        }
-        break;
-    }
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(void) t30_non_ecm_put_chunk(void *user_data, const uint8_t buf[], int len)
+SPAN_DECLARE(void) t30_non_ecm_put(void *user_data, const uint8_t buf[], int len)
 {
     t30_state_t *s;
     int i;
@@ -5523,7 +5513,7 @@ SPAN_DECLARE(void) t30_non_ecm_put_chunk(void *user_data, const uint8_t buf[], i
         break;
     case T30_STATE_F_DOC_NON_ECM:
         /* Document transfer */
-        if (t4_rx_put_chunk(&s->t4.rx, buf, len))
+        if (t4_rx_put(&s->t4.rx, buf, len))
         {
             /* That is the end of the document */
             set_state(s, T30_STATE_F_POST_DOC_NON_ECM);
@@ -5570,42 +5560,7 @@ SPAN_DECLARE_NONSTD(int) t30_non_ecm_get_bit(void *user_data)
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t30_non_ecm_get_byte(void *user_data)
-{
-    int byte;
-    t30_state_t *s;
-
-    s = (t30_state_t *) user_data;
-    switch (s->state)
-    {
-    case T30_STATE_D_TCF:
-        /* Trainability test. */
-        byte = 0;
-        if ((s->tcf_test_bits -= 8) < 0)
-        {
-            /* Finished sending training test. */
-            byte = 0x100;
-        }
-        break;
-    case T30_STATE_I:
-        /* Transferring real data. */
-        byte = t4_tx_get_byte(&s->t4.tx);
-        break;
-    case T30_STATE_D_POST_TCF:
-    case T30_STATE_II_Q:
-        /* We should be padding out a block of samples if we are here */
-        byte = 0;
-        break;
-    default:
-        span_log(&s->logging, SPAN_LOG_WARNING, "t30_non_ecm_get_byte in bad state %d\n", s->state);
-        byte = 0x100;
-        break;
-    }
-    return byte;
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(int) t30_non_ecm_get_chunk(void *user_data, uint8_t buf[], int max_len)
+SPAN_DECLARE(int) t30_non_ecm_get(void *user_data, uint8_t buf[], int max_len)
 {
     int len;
     t30_state_t *s;
@@ -5624,7 +5579,7 @@ SPAN_DECLARE(int) t30_non_ecm_get_chunk(void *user_data, uint8_t buf[], int max_
         break;
     case T30_STATE_I:
         /* Transferring real data. */
-        len = t4_tx_get_chunk(&s->t4.tx, buf, max_len);
+        len = t4_tx_get(&s->t4.tx, buf, max_len);
         break;
     case T30_STATE_D_POST_TCF:
     case T30_STATE_II_Q:
@@ -5632,7 +5587,7 @@ SPAN_DECLARE(int) t30_non_ecm_get_chunk(void *user_data, uint8_t buf[], int max_
         len = 0;
         break;
     default:
-        span_log(&s->logging, SPAN_LOG_WARNING, "t30_non_ecm_get_chunk in bad state %d\n", s->state);
+        span_log(&s->logging, SPAN_LOG_WARNING, "t30_non_ecm_get in bad state %d\n", s->state);
         len = -1;
         break;
     }

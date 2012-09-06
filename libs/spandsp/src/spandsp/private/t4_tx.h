@@ -36,7 +36,9 @@ typedef struct
     /*! \brief The libtiff context for the current TIFF file */
     TIFF *tiff_file;
 
-    /*! Image type - bilevel, gray, colour */
+    /*! \brief The compression type used in the TIFF file */
+    uint16_t compression;
+    /*! \brief Image type - bilevel, gray, colour */
     int image_type;
     /*! \brief The TIFF photometric setting for the current page. */
     uint16_t photo_metric;
@@ -54,6 +56,12 @@ typedef struct
     int image_buffer_size;
     /*! \brief Row counter for playing out the rows of the image. */
     int row;
+
+    /*! \brief Image length of the image in the file. This is used when the
+               image is resized or dithered flat. */
+    int image_length;
+    /*! \brief Row counter used when the image is resized or dithered flat. */
+    int raw_row;
 } t4_tx_tiff_state_t;
 
 /*!
@@ -83,6 +91,10 @@ struct t4_tx_state_s
 
     /*! \brief The type of compression used between the FAX machines. */
     int line_encoding;
+
+    int line_encoding_bilevel;
+    int line_encoding_gray;
+    int line_encoding_colour;
 
     /*! \brief The width of the current page, in pixels. */
     uint32_t image_width;
@@ -123,14 +135,19 @@ struct t4_tx_state_s
     union
     {
         t4_t6_encode_state_t t4_t6;
-#if defined(SPANDSP_SUPPORT_T42)
         t42_encode_state_t t42;
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
         t43_encode_state_t t43;
 #endif
         t85_encode_state_t t85;
     } encoder;
+
+    image_translate_state_t translator;
+
+    int apply_lab;
+    lab_params_t lab_params;
+    uint8_t *colour_map;
+    int colour_map_entries;
 
     /* Supporting information, like resolutions, which the backend may want. */
     t4_tx_metadata_t metadata;

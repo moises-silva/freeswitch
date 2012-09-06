@@ -82,11 +82,10 @@
 #include "spandsp/timezone.h"
 #include "spandsp/t4_rx.h"
 #include "spandsp/t4_tx.h"
+#include "spandsp/image_translate.h"
 #include "spandsp/t81_t82_arith_coding.h"
 #include "spandsp/t85.h"
-#if defined(SPANDSP_SUPPORT_T42)
 #include "spandsp/t42.h"
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
 #include "spandsp/t43.h"
 #endif
@@ -96,14 +95,13 @@
 #include "spandsp/private/logging.h"
 #include "spandsp/private/t81_t82_arith_coding.h"
 #include "spandsp/private/t85.h"
-#if defined(SPANDSP_SUPPORT_T42)
 #include "spandsp/private/t42.h"
-#endif
 #if defined(SPANDSP_SUPPORT_T43)
 #include "spandsp/private/t43.h"
 #endif
 #include "spandsp/private/t4_t6_decode.h"
 #include "spandsp/private/t4_t6_encode.h"
+#include "spandsp/private/image_translate.h"
 #include "spandsp/private/t4_rx.h"
 #include "spandsp/private/t4_tx.h"
 
@@ -544,6 +542,22 @@ static int row_to_run_lengths(uint32_t list[], const uint8_t row[], int width)
             list[entry++] = pos;
         }
     }
+#if defined(T4_STATE_DEBUGGING)
+    /* Dump the runs of black and white for analysis */
+    {
+        int prev;
+        int x;
+
+        printf("Runs (%d)", list[entry - 1]);
+        prev = 0;
+        for (x = 0;  x < entry;  x++)
+        {
+            printf(" %" PRIu32, list[x] - prev);
+            prev = list[x];
+        }
+        printf("\n");
+    }
+#endif
     return entry;
 }
 /*- End of function --------------------------------------------------------*/
@@ -904,14 +918,14 @@ static int get_next_row(t4_t6_encode_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t4_t6_encode_check_bit(t4_t6_encode_state_t *s)
+SPAN_DECLARE(int) t4_t6_encode_image_complete(t4_t6_encode_state_t *s)
 {
     if (s->bitstream_optr >= s->bitstream_iptr)
     {
         if (get_next_row(s) < 0)
             return SIG_STATUS_END_OF_DATA;
     }
-    return (s->bitstream[s->bitstream_optr] >> (7 - s->bit_pos)) & 1;
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -919,8 +933,12 @@ SPAN_DECLARE(int) t4_t6_encode_get_bit(t4_t6_encode_state_t *s)
 {
     int bit;
 
-    if ((bit = t4_t6_encode_check_bit(s)) < 0)
-        return bit;
+    if (s->bitstream_optr >= s->bitstream_iptr)
+    {
+        if (get_next_row(s) < 0)
+            return SIG_STATUS_END_OF_DATA;
+    }
+    bit = (s->bitstream[s->bitstream_optr] >> (7 - s->bit_pos)) & 1;
     if (--s->bit_pos < 0)
     {
         s->bitstream_optr++;
@@ -930,18 +948,7 @@ SPAN_DECLARE(int) t4_t6_encode_get_bit(t4_t6_encode_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-SPAN_DECLARE(int) t4_t6_encode_get_byte(t4_t6_encode_state_t *s)
-{
-    if (s->bitstream_optr >= s->bitstream_iptr)
-    {
-        if (get_next_row(s) < 0)
-            return 0x100;
-    }
-    return s->bitstream[s->bitstream_optr++];
-}
-/*- End of function --------------------------------------------------------*/
-
-SPAN_DECLARE(int) t4_t6_encode_get_chunk(t4_t6_encode_state_t *s, uint8_t buf[], int max_len)
+SPAN_DECLARE(int) t4_t6_encode_get(t4_t6_encode_state_t *s, uint8_t buf[], int max_len)
 {
     int len;
     int n;

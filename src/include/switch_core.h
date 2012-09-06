@@ -673,6 +673,7 @@ SWITCH_DECLARE(switch_size_t) switch_core_session_get_id(_In_ switch_core_sessio
   \return the total number of allocated sessions since core startup
 */
 SWITCH_DECLARE(switch_size_t) switch_core_session_id(void);
+SWITCH_DECLARE(switch_size_t) switch_core_session_id_dec(void);
 
 /*! 
   \brief Allocate and return a new session from the core based on a given endpoint module name
@@ -689,6 +690,9 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_by_name(_In_
   \return SWITCH_STATUS_SUCCESS if the thread was launched
 */
 SWITCH_DECLARE(switch_status_t) switch_core_session_thread_launch(_In_ switch_core_session_t *session);
+
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_thread_pool_launch(switch_core_session_t *session);
 
 /*! 
   \brief Retrieve a pointer to the channel object associated with a given session
@@ -742,13 +746,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_codec_slin(switch_core_s
 */
 SWITCH_DECLARE(char *) switch_core_get_uuid(void);
 
-#ifdef SWITCH_DEBUG_RWLOCKS
-SWITCH_DECLARE(switch_core_session_t *) switch_core_session_perform_locate(const char *uuid_str, const char *file, const char *func, int line);
-#endif
 
-#ifdef SWITCH_DEBUG_RWLOCKS
+SWITCH_DECLARE(switch_core_session_t *) switch_core_session_perform_locate(const char *uuid_str, const char *file, const char *func, int line);
 SWITCH_DECLARE(switch_core_session_t *) switch_core_session_perform_force_locate(const char *uuid_str, const char *file, const char *func, int line);
-#endif
+
 
 /*! 
   \brief Locate a session based on it's uuid
@@ -756,11 +757,8 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_perform_force_locate
   \return the session or NULL
   \note if the session was located it will have a read lock obtained which will need to be released with switch_core_session_rwunlock()
 */
-#ifdef SWITCH_DEBUG_RWLOCKS
+
 #define switch_core_session_locate(uuid_str) switch_core_session_perform_locate(uuid_str, __FILE__, __SWITCH_FUNC__, __LINE__)
-#else
-SWITCH_DECLARE(switch_core_session_t *) switch_core_session_locate(_In_z_ const char *uuid_str);
-#endif
 
 /*! 
   \brief Locate a session based on it's uuid even if the channel is not ready
@@ -768,11 +766,9 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_locate(_In_z_ const 
   \return the session or NULL
   \note if the session was located it will have a read lock obtained which will need to be released with switch_core_session_rwunlock()
 */
-#ifdef SWITCH_DEBUG_RWLOCKS
+
 #define switch_core_session_force_locate(uuid_str) switch_core_session_perform_force_locate(uuid_str, __FILE__, __SWITCH_FUNC__, __LINE__)
-#else
-SWITCH_DECLARE(switch_core_session_t *) switch_core_session_force_locate(_In_z_ const char *uuid_str);
-#endif
+
 
 /*! 
   \brief Retrieve a global variable from the core
@@ -831,7 +827,10 @@ SWITCH_DECLARE(void) switch_core_session_hupall_endpoint(const switch_endpoint_i
   \param partner [out] The session's partner, or NULL if it wasnt found
   \return SWITCH_STATUS_SUCCESS or SWITCH_STATUS_FALSE if this session isn't bridged
 */
-SWITCH_DECLARE(switch_status_t) switch_core_session_get_partner(switch_core_session_t *session, switch_core_session_t **partner);
+SWITCH_DECLARE(switch_status_t) switch_core_session_perform_get_partner(switch_core_session_t *session, switch_core_session_t **partner,
+																		const char *file, const char *func, int line);
+
+#define switch_core_session_get_partner(_session, _partner) switch_core_session_perform_get_partner(_session, _partner, __FILE__, __SWITCH_FUNC__, __LINE__)
 
 /*! 
   \brief Send a message to another session using it's uuid
@@ -1032,10 +1031,6 @@ SWITCH_DECLARE(switch_call_cause_t) switch_core_session_outgoing_channel(_In_opt
 																		 _Inout_ switch_core_session_t **new_session,
 																		 _Inout_ switch_memory_pool_t **pool, _In_ switch_originate_flag_t flags,
 																		 switch_call_cause_t *cancel_cause);
-
-SWITCH_DECLARE(switch_call_cause_t) switch_core_session_resurrect_channel(_In_z_ const char *endpoint_name,
-																		  _Inout_ switch_core_session_t **new_session,
-																		  _Inout_ switch_memory_pool_t **pool, _In_ void *data);
 
 /*! 
   \brief Receive a message on a given session
@@ -2133,6 +2128,7 @@ SWITCH_DECLARE(void) switch_time_sync(void);
  \return The current epoch time 
 */
 SWITCH_DECLARE(time_t) switch_epoch_time_now(time_t *t);
+SWITCH_DECLARE(const char *) switch_lookup_timezone(const char *tz_name);
 SWITCH_DECLARE(switch_status_t) switch_strftime_tz(const char *tz, const char *format, char *date, size_t len, switch_time_t thetime);
 SWITCH_DECLARE(switch_status_t) switch_time_exp_tz_name(const char *tz, switch_time_exp_t *tm, switch_time_t thetime);
 SWITCH_DECLARE(void) switch_load_network_lists(switch_bool_t reload);
@@ -2293,6 +2289,8 @@ SWITCH_DECLARE(int) switch_cache_db_affected_rows(switch_cache_db_handle_t *dbh)
 SWITCH_DECLARE(void) switch_cache_db_status(switch_stream_handle_t *stream);
 SWITCH_DECLARE(switch_status_t) _switch_core_db_handle(switch_cache_db_handle_t ** dbh, const char *file, const char *func, int line);
 #define switch_core_db_handle(_a) _switch_core_db_handle(_a, __FILE__, __SWITCH_FUNC__, __LINE__)
+SWITCH_DECLARE(switch_status_t) _switch_core_recovery_db_handle(switch_cache_db_handle_t ** dbh, const char *file, const char *func, int line);
+#define switch_core_recovery_db_handle(_a) _switch_core_recovery_db_handle(_a, __FILE__, __SWITCH_FUNC__, __LINE__)
 
 SWITCH_DECLARE(switch_bool_t) switch_cache_db_test_reactive(switch_cache_db_handle_t *db,
 															const char *test_sql, const char *drop_sql, const char *reactive_sql);
@@ -2349,6 +2347,13 @@ SWITCH_DECLARE(void) switch_close_extra_files(int *keep, int keep_ttl);
 SWITCH_DECLARE(switch_status_t) switch_core_thread_set_cpu_affinity(int cpu);
 SWITCH_DECLARE(void) switch_os_yield(void);
 SWITCH_DECLARE(switch_status_t) switch_core_get_stacksizes(switch_size_t *cur, switch_size_t *max);
+
+
+SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const char *profile_name);
+SWITCH_DECLARE(void) switch_core_recovery_untrack(switch_core_session_t *session, switch_bool_t force);
+SWITCH_DECLARE(void) switch_core_recovery_track(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_recovery_flush(const char *technology, const char *profile_name);
+
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:

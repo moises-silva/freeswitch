@@ -576,10 +576,15 @@ SWITCH_DECLARE(void) switch_channel_uninit(switch_channel_t *channel)
 	while (switch_queue_trypop(channel->dtmf_log_queue, &pop) == SWITCH_STATUS_SUCCESS) {
 		switch_safe_free(pop);
 	}
-	switch_core_hash_destroy(&channel->private_hash);
+
+	if (channel->private_hash) {
+		switch_core_hash_destroy(&channel->private_hash);
+	}
+
 	if (channel->app_flag_hash) {
 		switch_core_hash_destroy(&channel->app_flag_hash);
 	}
+
 	switch_mutex_lock(channel->profile_mutex);
 	switch_event_destroy(&channel->variables);
 	switch_event_destroy(&channel->api_list);
@@ -2948,8 +2953,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_ring_ready_value(swi
 {
 	switch_event_t *event;
 
-	if (!switch_channel_test_flag(channel, CF_RING_READY) && 
-		!switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+	if (!switch_channel_test_flag(channel, CF_RING_READY) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
 		switch_log_printf(SWITCH_CHANNEL_ID_LOG, file, func, line, switch_channel_get_uuid(channel), SWITCH_LOG_NOTICE, "Ring-Ready %s!\n", channel->name);
 		switch_channel_set_flag_value(channel, CF_RING_READY, rv);
 		if (channel->caller_profile && channel->caller_profile->times) {

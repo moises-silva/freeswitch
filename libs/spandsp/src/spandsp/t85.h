@@ -53,24 +53,6 @@ enum
     T85_LRLTWO = 0x40
 };
 
-/*! Return values from the T.85 decoder */
-enum
-{
-    /*! More image data is needed */
-    T85_MORE_DATA = 0,
-    /*! Image completed successfully */
-    T85_OK = -1,
-    /*! The decoder has interrupted */
-    T85_INTERRUPT = -2,
-    /*! An abort was found in the image data */
-    T85_ABORTED = -3,
-    /*! A memory allocation error occurred */
-    T85_NOMEM = -4,
-    /*! The image data is invalid. This includes finding values
-        in the BIH which lie outside the T.85 domain */
-    T85_INVALID_DATA = -5
-};
-
 /*! State of a working instance of the T.85 encoder */
 typedef struct t85_encode_state_s t85_encode_state_t;
 
@@ -82,13 +64,10 @@ extern "C"
 {
 #endif
 
-/*! \brief Get the next byte of the current document page. The document will
-           be padded for the current minimum scan line time.
+/*! \brief Check if we are at the end of the current document page.
     \param s The T.85 context.
-    \return The next byte. For the last byte of data, bit 8 is
-            set. In this case, one or more bits of the byte may be padded with
-            zeros, to complete the byte. */
-SPAN_DECLARE(int) t85_encode_get_byte(t85_encode_state_t *s);
+    \return 0 for more data to come. SIG_STATUS_END_OF_DATA for no more data. */
+SPAN_DECLARE(int) t85_encode_image_complete(t85_encode_state_t *s);
 
 /*! \brief Get the next chunk of the current document page. The document will
            be padded for the current minimum scan line time.
@@ -97,7 +76,7 @@ SPAN_DECLARE(int) t85_encode_get_byte(t85_encode_state_t *s);
     \param max_len The maximum length of the chunk.
     \return The actual length of the chunk. If this is less than max_len it 
             indicates that the end of the document has been reached. */
-SPAN_DECLARE(int) t85_encode_get_chunk(t85_encode_state_t *s, uint8_t buf[], int max_len);
+SPAN_DECLARE(int) t85_encode_get(t85_encode_state_t *s, uint8_t buf[], size_t max_len);
 
 /*! \brief Set the row read handler for a T.85 encode context.
     \param s The T.85 context.
@@ -107,6 +86,12 @@ SPAN_DECLARE(int) t85_encode_get_chunk(t85_encode_state_t *s, uint8_t buf[], int
 SPAN_DECLARE(int) t85_encode_set_row_read_handler(t85_encode_state_t *s,
                                                   t4_row_read_handler_t handler,
                                                   void *user_data);
+
+/*! Get the logging context associated with a T.85 encode context.
+    \brief Get the logging context associated with a T.85 encode context.
+    \param s The T.85 encode context.
+    \return A pointer to the logging context */
+SPAN_DECLARE(logging_state_t *) t85_encode_get_logging_state(t85_encode_state_t *s);
 
 /*! \brief Prepare to encode an image in T.85 format.
     \param s The T.85 context.
@@ -184,6 +169,12 @@ SPAN_DECLARE(int) t85_encode_get_compressed_image_size(t85_encode_state_t *s);
 /*! \brief Stop image encoding prematurely.
     \param s The T.85 context. */
 SPAN_DECLARE(void) t85_encode_abort(t85_encode_state_t *s);
+
+/*! Get the logging context associated with a T.85 decode context.
+    \brief Get the logging context associated with a T.85 decode context.
+    \param s The T.85 decode context.
+    \return A pointer to the logging context */
+SPAN_DECLARE(logging_state_t *) t85_decode_get_logging_state(t85_decode_state_t *s);
 
 /*! \brief Prepare to decode an image in T.85 format.
     \param s The T.85 context.
@@ -265,20 +256,12 @@ SPAN_DECLARE(int) t85_decode_set_image_size_constraints(t85_decode_state_t *s,
     \param status The type of status change which occured. */
 SPAN_DECLARE(void) t85_decode_rx_status(t85_decode_state_t *s, int status);
 
-/*! \brief Decode a byte of T.85 data.
-    \param s The T.85 context.
-    \param byte The data to be decoded.
-    \return 0 for OK. */
-SPAN_DECLARE(int) t85_decode_put_byte(t85_decode_state_t *s, int byte);
-
 /*! \brief Decode a chunk of T.85 data.
     \param s The T.85 context.
     \param data The data to be decoded.
     \param len The length of the data to be decoded.
     \return 0 for OK. */
-SPAN_DECLARE(int) t85_decode_put_chunk(t85_decode_state_t *s,
-                                       const uint8_t data[],
-                                       size_t len);
+SPAN_DECLARE(int) t85_decode_put(t85_decode_state_t *s, const uint8_t data[], size_t len);
 
 #if defined(__cplusplus)
 }
