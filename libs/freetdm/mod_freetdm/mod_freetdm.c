@@ -2057,6 +2057,7 @@ static FIO_SIGNAL_CB_FUNCTION(on_fxo_signal)
 		}
 		break;
 	case FTDM_SIGEVENT_SIGSTATUS_CHANGED:
+	case FTDM_SIGEVENT_COLLECTED_DIGIT: /* Analog E&M */
 		break;
 	default:
 		{
