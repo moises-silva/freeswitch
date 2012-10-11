@@ -84,6 +84,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_perform_file_open(const char *file, 
 		fh->file_path = switch_core_strdup(fh->memory_pool, file_path);
 		is_stream = 1;
 	} else {
+		char *end_ext = NULL;
 		if ((flags & SWITCH_FILE_FLAG_WRITE)) {
 
 			char *p, *e;
@@ -112,14 +113,27 @@ SWITCH_DECLARE(switch_status_t) switch_core_perform_file_open(const char *file, 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unknown file Format [%s]\n", file_path);
 			switch_goto_status(SWITCH_STATUS_FALSE, fail);
 		}
-		ext++;
 		fh->file_path = switch_core_strdup(fh->memory_pool, file_path);
+
+		if (flags & SWITCH_FILE_PATH_TMP_EXT) {
+			end_ext = ext;
+			*ext = 0;
+			ext--;
+			if ((ext = strrchr(file_path, '.')) == 0) {
+				ext++;
+				*ext = '.';
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unknown file Format [%s]\n", file_path);
+				switch_goto_status(SWITCH_STATUS_FALSE, fail);
+			}
+		}
+		ext++;
 	}
 
 
 
 	if ((fh->file_interface = switch_loadable_module_get_file_interface(ext)) == 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid file format [%s] for [%s]!\n", ext, file_path);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid file format [%s] for [%s]!\n",
+				ext, fh->file_path);
 		switch_goto_status(SWITCH_STATUS_GENERR, fail);
 	}
 

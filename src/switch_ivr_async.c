@@ -1016,6 +1016,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 
 struct record_helper {
 	char *file;
+	char *final_file;
 	switch_file_handle_t *fh;
 	uint32_t packet_len;
 	int min_sec;
@@ -1034,6 +1035,9 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 	case SWITCH_ABC_TYPE_INIT:
 		if (switch_event_create(&event, SWITCH_EVENT_RECORD_START) == SWITCH_STATUS_SUCCESS) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-File-Path", rh->file);
+			if (rh->final_file) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Final-File-Path", rh->final_file);
+			}
 			switch_channel_event_set_data(channel, event);
 			switch_event_fire(&event);
 		}
@@ -1075,11 +1079,25 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 					switch_channel_set_variable(channel, "RECORD_DISCARDED", "true");
 					switch_file_remove(rh->file, switch_core_session_get_pool(session));
 				}
+
+				if (rh->final_file) {
+					/* we're supposed to move the file to its final destination */
+					if (switch_file_rename(rh->file, rh->final_file, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+							"Failed moving file %s -> %s\n", rh->file, rh->final_file);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"Moved file %s -> %s\n", rh->file, rh->final_file);
+					}
+				}
 			}
 
 			if (switch_event_create(&event, SWITCH_EVENT_RECORD_STOP) == SWITCH_STATUS_SUCCESS) {
 				switch_channel_event_set_data(channel, event);
 				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-File-Path", rh->file);
+				if (rh->final_file) {
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Final-File-Path", rh->final_file);
+				}
 				switch_event_fire(&event);
 			}
 
@@ -1678,9 +1696,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session(switch_core_session_t 
 	int file_flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
 	switch_bool_t hangup_on_error = SWITCH_FALSE;
 	char *file_path = NULL;
-	
+	char *orig_file = NULL;
+
 	if ((p = switch_channel_get_variable(channel, "RECORD_HANGUP_ON_ERROR"))) {
 		hangup_on_error = switch_true(p);
+	}
+
+	if ((p = switch_channel_get_variable(channel, "RECORD_USE_TEMP"))) {
+		if (switch_true(p)) {
+			orig_file = switch_core_session_strdup(session, file);
+			file = switch_core_session_sprintf(session, "%s.tmp", file);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
+					SWITCH_LOG_DEBUG, "Using temporary file %s for recording\n", file);
+			file_flags |= SWITCH_FILE_PATH_TMP_EXT;
+		}
 	}
 
 	switch_core_session_get_read_impl(session, &read_impl);
@@ -1894,6 +1923,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session(switch_core_session_t 
 	rh = switch_core_session_alloc(session, sizeof(*rh));
 	rh->fh = fh;
 	rh->file = switch_core_session_strdup(session, file);
+	rh->final_file = orig_file;
 	rh->packet_len = read_impl.decoded_bytes_per_packet;
 
 	if (file_flags & SWITCH_FILE_WRITE_APPEND) {
