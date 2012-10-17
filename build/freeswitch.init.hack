@@ -9,7 +9,18 @@
 #  processname: freeswitch
 #  config: /usr/local/freeswitch/conf/freeswitch.conf
 #  pidfile: /usr/local/freeswitch/run/freeswitch.pid
-#
+
+### BEGIN INIT INFO
+# Provides: freeswitch
+# Required-Start: wanrouter
+# Required-Stop: wanrouter
+# Should-Start: wanrouter
+# Should-Stop: wanrouter
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: FreeSWITCH
+# Description: The FreeSWITCH Communications Platform
+### END INIT INFO
 
 # Source function library.
 . /etc/init.d/functions
