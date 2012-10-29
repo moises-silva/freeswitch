@@ -1180,7 +1180,7 @@ SWITCH_STANDARD_APP(wait_for_answer_function)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Waiting for answer\n");
-	while (!switch_channel_test_flag(channel, CF_ANSWERED) && switch_channel_get_state(channel) < CS_HANGUP) {
+	while (!switch_channel_test_flag(channel, CF_ANSWERED) && switch_channel_ready(channel)) {
 		switch_ivr_sleep(session, 100, SWITCH_TRUE, NULL);
 	}
 }
