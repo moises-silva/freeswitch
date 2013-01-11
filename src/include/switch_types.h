@@ -146,6 +146,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_CHANNEL_EXECUTE_ON_TONE_DETECT_VARIABLE "execute_on_tone_detect"
 #define SWITCH_CHANNEL_EXECUTE_ON_ORIGINATE_VARIABLE "execute_on_originate"
 #define SWITCH_CHANNEL_EXECUTE_ON_POST_ORIGINATE_VARIABLE "execute_on_post_originate"
+#define SWITCH_CHANNEL_EXECUTE_ON_PRE_ORIGINATE_VARIABLE "execute_on_pre_originate"
 
 #define SWITCH_CHANNEL_API_ON_ANSWER_VARIABLE "api_on_answer"
 #define SWITCH_CHANNEL_API_ON_PRE_ANSWER_VARIABLE "api_on_pre_answer"
@@ -154,6 +155,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_CHANNEL_API_ON_TONE_DETECT_VARIABLE "api_on_tone_detect"
 #define SWITCH_CHANNEL_API_ON_ORIGINATE_VARIABLE "api_on_originate"
 #define SWITCH_CHANNEL_API_ON_POST_ORIGINATE_VARIABLE "api_on_post_originate"
+#define SWITCH_CHANNEL_API_ON_PRE_ORIGINATE_VARIABLE "api_on_pre_originate"
 
 #define SWITCH_CALL_TIMEOUT_VARIABLE "call_timeout"
 #define SWITCH_HOLDING_UUID_VARIABLE "holding_uuid"
@@ -213,6 +215,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_BITS_PER_BYTE 8
 #define SWITCH_DEFAULT_FILE_BUFFER_LEN 65536
 #define SWITCH_DTMF_LOG_LEN 1000
+#define SWITCH_MAX_TRANS 2000
 typedef uint8_t switch_byte_t;
 
 /*!
@@ -324,7 +327,7 @@ typedef enum {
 	SCF_CLEAR_SQL = (1 << 17),
 	SCF_THREADED_SYSTEM_EXEC = (1 << 18),
 	SCF_SYNC_CLOCK_REQUESTED = (1 << 19),
-	SCF_CORE_ODBC_REQ = (1 << 20),
+	SCF_CORE_NON_SQLITE_DB_REQ = (1 << 20),
 	SCF_DEBUG_SQL = (1 << 21),
 	SCF_API_EXPANSION = (1 << 22),
 	SCF_SESSION_THREAD_POOL = (1 << 23)
@@ -474,6 +477,7 @@ struct switch_directories {
 	char *storage_dir;
 	char *recordings_dir;
 	char *sounds_dir;
+	char *lib_dir;
 };
 
 typedef struct switch_directories switch_directories;
@@ -732,12 +736,17 @@ typedef enum {
 
 	 */
 
-	RTP_BUG_CHANGE_SSRC_ON_MARKER = (1 << 9)
+	RTP_BUG_CHANGE_SSRC_ON_MARKER = (1 << 9),
 
 	/*
 	  By default FS will change the SSRC when the marker is set and it detects a timestamp reset.
 	  If this setting is enabled it will NOT do this (old behaviour).
 	 */
+
+	RTP_BUG_FLUSH_JB_ON_DTMF = (1 << 10)
+	
+	/* FLUSH JITTERBUFFER When getting RFC2833 to reduce bleed through */
+
 
 } switch_rtp_bug_flag_t;
 
@@ -758,6 +767,11 @@ typedef struct {
 	unsigned ssrc:32;			/* synchronization source */
 } switch_rtp_hdr_t;
 
+typedef struct {
+	unsigned length:16;			/* length                 */
+	unsigned profile:16;		/* defined by profile     */
+} switch_rtp_hdr_ext_t;
+
 #else /*  BIG_ENDIAN */
 
 typedef struct {
@@ -771,6 +785,11 @@ typedef struct {
 	unsigned ts:32;				/* timestamp              */
 	unsigned ssrc:32;			/* synchronization source */
 } switch_rtp_hdr_t;
+
+typedef struct {
+	unsigned profile:16;		/* defined by profile     */
+	unsigned length:16;			/* length                 */
+} switch_rtp_hdr_ext_t;
 
 #endif
 
@@ -1030,7 +1049,8 @@ typedef enum {
 	SWITCH_LOG_CRIT = 2,
 	SWITCH_LOG_ALERT = 1,
 	SWITCH_LOG_CONSOLE = 0,
-	SWITCH_LOG_INVALID = 64
+	SWITCH_LOG_INVALID = 64,
+	SWITCH_LOG_UNINIT = 1000,
 } switch_log_level_t;
 
 
@@ -1168,6 +1188,7 @@ typedef enum {
 	CF_OUTBOUND,
 	CF_EARLY_MEDIA,
 	CF_BRIDGE_ORIGINATOR,
+	CF_UUID_BRIDGE_ORIGINATOR,
 	CF_TRANSFER,
 	CF_ACCEPT_CNG,
 	CF_REDIRECT,
@@ -1248,6 +1269,8 @@ typedef enum {
 	CF_TRACKABLE,
 	CF_NO_CDR,
 	CF_EARLY_OK,
+	CF_MEDIA_TRANS,
+	CF_HOLD_ON_BRIDGE,
 	/* WARNING: DO NOT ADD ANY FLAGS BELOW THIS LINE */
 	/* IF YOU ADD NEW ONES CHECK IF THEY SHOULD PERSIST OR ZERO THEM IN switch_core_session.c switch_core_session_request_xml() */
 	CF_FLAG_MAX
@@ -1297,7 +1320,8 @@ typedef enum {
 	SAF_SUPPORT_NOMEDIA = (1 << 0),
 	SAF_ROUTING_EXEC = (1 << 1),
 	SAF_MEDIA_TAP = (1 << 2),
-	SAF_ZOMBIE_EXEC = (1 << 3)
+	SAF_ZOMBIE_EXEC = (1 << 3),
+	SAF_NO_LOOPBACK = (1 << 4)
 } switch_application_flag_enum_t;
 typedef uint32_t switch_application_flag_t;
 
@@ -1425,6 +1449,11 @@ typedef enum {
 	SWITCH_CODEC_TYPE_T38,
 	SWITCH_CODEC_TYPE_APP
 } switch_codec_type_t;
+
+typedef enum {
+	SWITCH_MEDIA_TYPE_AUDIO,
+	SWITCH_MEDIA_TYPE_VIDEO
+} switch_media_type_t;
 
 
 /*!
@@ -1820,6 +1849,7 @@ typedef struct switch_loadable_module switch_loadable_module_t;
 typedef struct switch_frame switch_frame_t;
 typedef struct switch_rtcp_frame switch_rtcp_frame_t;
 typedef struct switch_channel switch_channel_t;
+typedef struct switch_sql_queue_manager switch_sql_queue_manager_t;
 typedef struct switch_file_handle switch_file_handle_t;
 typedef struct switch_core_session switch_core_session_t;
 typedef struct switch_caller_profile switch_caller_profile_t;
@@ -1834,6 +1864,8 @@ typedef struct switch_buffer switch_buffer_t;
 typedef struct switch_codec_settings switch_codec_settings_t;
 typedef struct switch_codec_fmtp switch_codec_fmtp_t;
 typedef struct switch_odbc_handle switch_odbc_handle_t;
+typedef struct switch_pgsql_handle switch_pgsql_handle_t;
+typedef struct switch_pgsql_result switch_pgsql_result_t;
 
 typedef struct switch_io_routines switch_io_routines_t;
 typedef struct switch_speech_handle switch_speech_handle_t;
@@ -1956,6 +1988,19 @@ struct switch_ivr_dmachine_match {
 typedef struct switch_ivr_dmachine_match switch_ivr_dmachine_match_t;
 typedef switch_status_t (*switch_ivr_dmachine_callback_t) (switch_ivr_dmachine_match_t *match);
 
+#define MAX_ARG_RECURSION 25
+
+#define arg_recursion_check_start(_args) if (_args) {					\
+		if (_args->loops >= MAX_ARG_RECURSION) {						\
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,		\
+							  "RECURSION ERROR!  It's not the best idea to call things that collect input recursively from an input callback.\n"); \
+			return SWITCH_STATUS_GENERR;								\
+		} else {_args->loops++;}										\
+	}
+
+
+#define arg_recursion_check_stop(_args) if (_args) _args->loops--
+
 typedef struct {
 	switch_input_callback_function_t input_callback;
 	void *buf;
@@ -1963,6 +2008,7 @@ typedef struct {
 	switch_read_frame_callback_function_t read_frame_callback;
 	void *user_data;
 	switch_ivr_dmachine_t *dmachine;
+	int loops;
 } switch_input_args_t;
 
 
@@ -2018,6 +2064,13 @@ typedef switch_status_t (*switch_module_shutdown_t) SWITCH_MODULE_SHUTDOWN_ARGS;
 #define SWITCH_MODULE_SHUTDOWN_FUNCTION(name) switch_status_t name SWITCH_MODULE_SHUTDOWN_ARGS
 
 typedef enum {
+	SWITCH_PRI_LOW = 1,
+	SWITCH_PRI_NORMAL = 10,
+	SWITCH_PRI_IMPORTANT = 50,
+	SWITCH_PRI_REALTIME = 99,
+} switch_thread_priority_t;
+
+typedef enum {
 	SMODF_NONE = 0,
 	SMODF_GLOBAL_SYMBOLS = (1 << 0)
 } switch_module_flag_enum_t;
@@ -2057,6 +2110,7 @@ struct switch_core_session;
 struct switch_media_bug;
 /*! \brief A digit stream parser object */
 struct switch_ivr_digit_stream_parser;
+struct sql_queue_manager;
 
 SWITCH_END_EXTERN_C
 #endif

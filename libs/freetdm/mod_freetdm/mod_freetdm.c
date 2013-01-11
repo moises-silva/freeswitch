@@ -1318,6 +1318,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 	if (!zstr(outbound_profile->caller_id_number)) {
 		callerid_num = switch_sanitize_number(switch_core_strdup(outbound_profile->pool, outbound_profile->caller_id_number));
+		if ( callerid_num && *callerid_num == '+' ) {
+			callerid_num++;
+		}
 	}
 
 	if (!zstr(callerid_num) && !strcmp(callerid_num, SWITCH_DEFAULT_CLID_NUMBER)) {
@@ -1394,6 +1397,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 		sipvar = switch_channel_get_variable(channel, "sip_h_X-FreeTDM-CallerNumber");
 		if (sipvar) {
+			if ( *sipvar == '+' ) {
+				sipvar++;
+			}
 			ftdm_set_string(caller_data.cid_num.digits, sipvar);
 		}
 
@@ -1653,7 +1659,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	caller_data.rdnis.plan = outbound_profile->rdnis_numplan;
 
 	ftdm_set_string(caller_data.cid_name, outbound_profile->caller_id_name);
-	ftdm_set_string(caller_data.cid_num.digits, switch_str_nil(outbound_profile->caller_id_number));
+	ftdm_set_string(caller_data.cid_num.digits, switch_str_nil(callerid_num));
 
 	memset(&hunting, 0, sizeof(hunting));
 
@@ -3769,11 +3775,14 @@ static switch_status_t load_config(void)
 			const char *dialplan = "XML";
 			const char *tonegroup = NULL;
 			char *digit_timeout = NULL;
+			char *dial_timeout = NULL;
 			char *max_digits = NULL;
 			char *dial_regex = NULL;
 			char *hold_music = NULL;
 			char *fail_dial_regex = NULL;
-			uint32_t span_id = 0, to = 0, max = 0;
+			char str_false[] = "false";
+			char *answer_supervision = str_false;
+			uint32_t span_id = 0, to = 0, max = 0, dial_timeout_int = 0;
 			ftdm_span_t *span = NULL;
 			analog_option_t analog_options = ANALOG_OPTION_NONE;
 
@@ -3785,6 +3794,8 @@ static switch_status_t load_config(void)
 					tonegroup = val;
 				} else if (!strcasecmp(var, "digit_timeout") || !strcasecmp(var, "digit-timeout")) {
 					digit_timeout = val;
+				} else if (!strcasecmp(var, "dial-timeout")) {
+					dial_timeout = val;
 				} else if (!strcasecmp(var, "context")) {
 					context = val;
 				} else if (!strcasecmp(var, "dialplan")) {
@@ -3797,6 +3808,8 @@ static switch_status_t load_config(void)
 					hold_music = val;
 				} else if (!strcasecmp(var, "max_digits") || !strcasecmp(var, "max-digits")) {
 					max_digits = val;
+				} else if (!strcasecmp(var, "answer-supervision")) {
+					answer_supervision = val;
 				} else if (!strcasecmp(var, "enable-analog-option")) {
 					analog_options = enable_analog_option(val, analog_options);
 				}
@@ -3813,6 +3826,10 @@ static switch_status_t load_config(void)
 
 			if (digit_timeout) {
 				to = atoi(digit_timeout);
+			}
+
+			if (dial_timeout) {
+				dial_timeout_int = atoi(dial_timeout);
 			}
 
 			if (max_digits) {
@@ -3845,7 +3862,9 @@ static switch_status_t load_config(void)
 
 			if (ftdm_configure_span(span, "analog_em", on_analog_signal,
 								   "tonemap", tonegroup,
+								   "answer_supervision", answer_supervision,
 								   "digit_timeout", &to,
+								   "dial_timeout", &dial_timeout_int,
 								   "max_dialstr", &max,
 								   FTDM_TAG_END) != FTDM_SUCCESS) {
 				LOAD_ERROR("Error starting FreeTDM span %d\n", span_id);

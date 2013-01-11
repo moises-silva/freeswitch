@@ -141,6 +141,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_sleep(switch_core_session_t *session,
 	int sval = 0;
 	const char *var;
 
+	arg_recursion_check_start(args);
+
 	/*
 	   if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND && !switch_channel_test_flag(channel, CF_PROXY_MODE) && 
 	   !switch_channel_media_ready(channel) && !switch_channel_test_flag(channel, CF_SERVICE)) {
@@ -153,15 +155,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_sleep(switch_core_session_t *session,
 
 	if (!switch_channel_media_ready(channel)) {
 		
-		for (elapsed=0; elapsed<(ms/20); elapsed++) {
+		for (elapsed=0; switch_channel_up(channel) && elapsed<(ms/20); elapsed++) {
 			if (switch_channel_test_flag(channel, CF_BREAK)) {
 				switch_channel_clear_flag(channel, CF_BREAK);
-				return SWITCH_STATUS_BREAK;
+				switch_goto_status(SWITCH_STATUS_BREAK, end);
 			}
 		
 			switch_yield(20 * 1000);
 		}
-		return SWITCH_STATUS_SUCCESS;
+		switch_goto_status(SWITCH_STATUS_SUCCESS, end);
 	}
 
 	var = switch_channel_get_variable(channel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE);
@@ -183,7 +185,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_sleep(switch_core_session_t *session,
 								   switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec Error L16@%uhz %u channels %dms\n",
 							  imp.samples_per_second, imp.number_of_channels, imp.microseconds_per_packet / 1000);
-			return SWITCH_STATUS_FALSE;
+			switch_goto_status(SWITCH_STATUS_FALSE, end);
 		}
 
 
@@ -213,7 +215,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_sleep(switch_core_session_t *session,
 	}
 
 	if (!ms) {
-		return SWITCH_STATUS_SUCCESS;
+		switch_goto_status(SWITCH_STATUS_SUCCESS, end);
 	}
 
 	for (;;) {
@@ -302,6 +304,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_sleep(switch_core_session_t *session,
 			switch_core_session_write_frame(session, &cng_frame, SWITCH_IO_FLAG_NONE, 0);
 		}
 	}
+
+
+ end:
+
+	arg_recursion_check_stop(args);
 
 	if (write_frame.codec) {
 		switch_core_codec_destroy(&codec);
@@ -640,6 +647,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_flag(channel, CF_BREAK); 
 			}
 			
+			switch_channel_audio_sync(channel);
 		}
 	} else if (cmd_hash == CMD_UNICAST) {
 		char *local_ip = switch_event_get_header(event, "local-ip");
@@ -873,6 +881,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 	unsigned char *abuf = NULL;
 	switch_codec_implementation_t imp = { 0 };
 
+
+
 	if (switch_channel_test_flag(channel, CF_RECOVERED) && switch_channel_test_flag(channel, CF_CONTROLLED)) {
 		switch_channel_clear_flag(channel, CF_CONTROLLED);
 	}
@@ -885,6 +895,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 	if (switch_channel_get_state(channel) == CS_RESET) {
 		return SWITCH_STATUS_FALSE;
 	}
+
+	arg_recursion_check_start(args);
 
 	if ((to = switch_channel_get_variable(channel, "park_timeout"))) {
 		char *cause_str;
@@ -930,7 +942,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 								   switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec Error L16@%uhz %u channels %dms\n",
 									  imp.samples_per_second, imp.number_of_channels, imp.microseconds_per_packet / 1000);
-					return SWITCH_STATUS_FALSE;
+					switch_goto_status(SWITCH_STATUS_FALSE, end);
 				}
 
 
@@ -981,7 +993,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 		if (switch_channel_test_flag(channel, CF_UNICAST)) {
 			if (!switch_channel_media_ready(channel)) {
 				if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
-					return SWITCH_STATUS_FALSE;
+					switch_goto_status(SWITCH_STATUS_FALSE, end);
 				}
 			}
 
@@ -1099,6 +1111,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 
 	}
 
+ end:
+
+	arg_recursion_check_stop(args);
+
 	if (write_frame.codec) {
 		switch_core_codec_destroy(&codec);
 	}
@@ -1132,12 +1148,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_collect_digits_callback(switch_core_s
 		return SWITCH_STATUS_GENERR;
 	}
 
+	arg_recursion_check_start(args);
+
 	if (abs_timeout) {
 		abs_started = switch_micro_time_now();
 	}
 	if (digit_timeout) {
 		digit_started = switch_micro_time_now();
 	}
+
 	while (switch_channel_ready(channel)) {
 		switch_frame_t *read_frame = NULL;
 		switch_event_t *event;
@@ -1222,6 +1241,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_collect_digits_callback(switch_core_s
 			}
 		}
 	}
+
+	arg_recursion_check_stop(args);
 
 	return status;
 }
@@ -1390,6 +1411,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_hold(switch_core_session_t *session, 
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	const char *stream;
 	const char *other_uuid;
+	switch_event_t *event;
 
 	msg.message_id = SWITCH_MESSAGE_INDICATE_HOLD;
 	msg.string_arg = message;
@@ -1404,6 +1426,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_hold(switch_core_session_t *session, 
 		if ((other_uuid = switch_channel_get_partner_uuid(channel))) {
 			switch_ivr_broadcast(other_uuid, stream, SMF_ECHO_ALEG | SMF_LOOP);
 		}
+	}
+
+	if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_HOLD) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_event_set_data(channel, event);
+		switch_event_fire(&event);
 	}
 
 
@@ -1428,6 +1455,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_unhold(switch_core_session_t *session
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	const char *other_uuid;
 	switch_core_session_t *b_session;
+	switch_event_t *event;
 
 	msg.message_id = SWITCH_MESSAGE_INDICATE_UNHOLD;
 	msg.from = __FILE__;
@@ -1445,6 +1473,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_unhold(switch_core_session_t *session
 		switch_core_session_rwunlock(b_session);
 	}
 
+
+	if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_UNHOLD) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_event_set_data(channel, event);
+		switch_event_fire(&event);
+	}
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -1476,6 +1509,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_media(const char *uuid, switch_media_
 
 	if ((session = switch_core_session_locate(uuid))) {
 		channel = switch_core_session_get_channel(session);
+		
+		if (switch_channel_test_flag(channel, CF_MEDIA_TRANS)) {
+			switch_core_session_rwunlock(session);
+			return SWITCH_STATUS_INUSE;
+		}
+
+		switch_channel_set_flag(channel, CF_MEDIA_TRANS);
 
 		if ((flags & SMF_REBRIDGE) && !switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR)) {
 			swap = 1;
@@ -1527,6 +1567,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_media(const char *uuid, switch_media_
 			}
 		}
 
+		switch_channel_clear_flag(channel, CF_MEDIA_TRANS);
 		switch_core_session_rwunlock(session);
 
 		if (other_channel) {
@@ -1558,6 +1599,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_nomedia(const char *uuid, switch_medi
 	if ((session = switch_core_session_locate(uuid))) {
 		status = SWITCH_STATUS_SUCCESS;
 		channel = switch_core_session_get_channel(session);
+
+		if (switch_channel_test_flag(channel, CF_MEDIA_TRANS)) {
+			switch_core_session_rwunlock(session);
+			return SWITCH_STATUS_INUSE;
+		}
+
+		switch_channel_set_flag(channel, CF_MEDIA_TRANS);
 
 		if ((flags & SMF_REBRIDGE) && !switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR)) {
 			swap = 1;
@@ -1617,8 +1665,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_nomedia(const char *uuid, switch_medi
 				switch_core_session_rwunlock(other_session);
 			}
 		}
+
+		switch_channel_clear_flag(channel, CF_MEDIA_TRANS);
 		switch_core_session_rwunlock(session);
 	}
+
+
 
 	return status;
 }
@@ -1740,6 +1792,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 		switch_channel_set_caller_profile(channel, new_profile);
 
 		switch_channel_set_state(channel, CS_ROUTING);
+		switch_channel_audio_sync(channel);
 
 		msg.message_id = SWITCH_MESSAGE_INDICATE_TRANSFER;
 		msg.from = __FILE__;
@@ -2820,7 +2873,7 @@ SWITCH_DECLARE(void) switch_ivr_delay_echo(switch_core_session_t *session, uint3
 			break;
 		}
 
-		stfu_n_eat(jb, ts, read_frame->payload, read_frame->data, read_frame->datalen, 0);
+		stfu_n_eat(jb, ts, 0, read_frame->payload, read_frame->data, read_frame->datalen, 0);
 		ts += read_impl.samples_per_packet;
 
 		if ((jb_frame = stfu_n_read_a_frame(jb))) {
@@ -2856,6 +2909,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_say(switch_core_session_t *session,
 	switch_assert(session);
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
+
+	arg_recursion_check_start(args);
+
 
 	if (zstr(module_name)) {
 		module_name = "en";
@@ -2937,6 +2993,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_say(switch_core_session_t *session,
 	}
 
   done:
+
+	arg_recursion_check_stop(args);
+
 
 	if (hint_data) {
 		switch_event_destroy(&hint_data);
@@ -3183,6 +3242,19 @@ SWITCH_DECLARE(switch_bool_t) switch_ivr_uuid_exists(const char *uuid)
 	switch_core_session_t *psession = NULL;
 
 	if ((psession = switch_core_session_locate(uuid))) {
+		switch_core_session_rwunlock(psession);
+		exists = 1;
+	}
+
+	return exists;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_ivr_uuid_force_exists(const char *uuid)
+{
+	switch_bool_t exists = SWITCH_FALSE;
+	switch_core_session_t *psession = NULL;
+
+	if ((psession = switch_core_session_force_locate(uuid))) {
 		switch_core_session_rwunlock(psession);
 		exists = 1;
 	}

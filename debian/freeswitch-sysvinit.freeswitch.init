@@ -16,9 +16,11 @@ PATH=/sbin:/usr/sbin:/bin:/usr/bin
 DESC=freeswitch
 NAME=freeswitch
 DAEMON=/usr/bin/freeswitch
-DAEMON_ARGS="-u freeswitch -g freeswitch -rp -nc -nonat"
+DAEMON_ARGS="-u freeswitch -g freeswitch -nc"
 USER=freeswitch
-PIDFILE=/var/run/$NAME/$NAME.pid
+GROUP=freeswitch
+RUNDIR=/var/run/$NAME
+PIDFILE=$RUNDIR/$NAME.pid
 SCRIPTNAME=/etc/init.d/$NAME
 WORKDIR=/var/lib/$NAME
 
@@ -28,6 +30,11 @@ WORKDIR=/var/lib/$NAME
 . /lib/lsb/init-functions
 
 do_start() {
+  # Directory in /var/run may disappear on reboot (e.g. when tmpfs used for /var/run).
+  mkdir -p $RUNDIR
+  chown -R $USER:$GROUP $RUNDIR
+  chmod -R ug=rwX,o= $RUNDIR
+
   start-stop-daemon --start --quiet \
     --pidfile $PIDFILE --exec $DAEMON --name $NAME --user $USER \
     --test > /dev/null \

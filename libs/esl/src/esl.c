@@ -506,6 +506,11 @@ ESL_DECLARE(esl_status_t) esl_sendevent(esl_handle_t *handle, esl_event_t *event
 	len = strlen(txt) + 100;
 	event_buf = malloc(len);
 	assert(event_buf);
+
+	if (!event_buf) {
+		return ESL_FAIL;
+	}
+
 	memset(event_buf, 0, len);
 	
 	snprintf(event_buf, len, "sendevent %s\n%s", esl_event_name(event->event_id), txt);
@@ -566,6 +571,11 @@ ESL_DECLARE(esl_status_t) esl_sendmsg(esl_handle_t *handle, esl_event_t *event, 
 	len = strlen(txt) + 100;
 	cmd_buf = malloc(len);
 	assert(cmd_buf);
+
+	if (!cmd_buf) {
+		return ESL_FAIL;
+	}
+
 	memset(cmd_buf, 0, len);	
 
 	if (uuid) {
@@ -916,6 +926,9 @@ ESL_DECLARE(esl_status_t) esl_connect_timeout(esl_handle_t *handle, const char *
 	int rval = 0;
 	const char *hval;
 	struct addrinfo hints = { 0 }, *result;
+	struct sockaddr_in *sockaddr_in;
+	struct sockaddr_in6 *sockaddr_in6;
+	socklen_t socklen;
 #ifndef WIN32
 	int fd_flags = 0;
 #else
@@ -936,27 +949,38 @@ ESL_DECLARE(esl_status_t) esl_connect_timeout(esl_handle_t *handle, const char *
 	if (!handle->packet_buf) {
 		esl_buffer_create(&handle->packet_buf, BUF_CHUNK, BUF_START, 0);
 	}
-	
-	handle->sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-	
-	if (handle->sock == ESL_SOCK_INVALID) {
-		snprintf(handle->err, sizeof(handle->err), "Socket Error");
-		return ESL_FAIL;
-	}
 
-
-	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
-	
+
 	if (getaddrinfo(host, NULL, &hints, &result)) {
 		strncpy(handle->err, "Cannot resolve host", sizeof(handle->err));
 		goto fail;
 	}
 
 	memcpy(&handle->sockaddr, result->ai_addr, sizeof(handle->sockaddr));	
-	handle->sockaddr.sin_family = AF_INET;
-	handle->sockaddr.sin_port = htons(port);
+        switch(handle->sockaddr.ss_family) {
+		case AF_INET:
+			sockaddr_in = (struct sockaddr_in*)&(handle->sockaddr);
+			sockaddr_in->sin_port = htons(port);
+			socklen = sizeof(struct sockaddr_in);
+			break;
+		case AF_INET6:
+			sockaddr_in6 = (struct sockaddr_in6*)&(handle->sockaddr);
+			sockaddr_in6->sin6_port = htons(port);
+			socklen = sizeof(struct sockaddr_in6);
+			break;
+		default:
+			strncpy(handle->err, "Host resolves to unsupported address family", sizeof(handle->err));
+			goto fail;
+	}
 	freeaddrinfo(result);
+	
+	handle->sock = socket(handle->sockaddr.ss_family, SOCK_STREAM, IPPROTO_TCP);
+	
+	if (handle->sock == ESL_SOCK_INVALID) {
+		snprintf(handle->err, sizeof(handle->err), "Socket Error");
+		return ESL_FAIL;
+	}
 
 	if (timeout) {
 #ifdef WIN32
@@ -974,7 +998,7 @@ ESL_DECLARE(esl_status_t) esl_connect_timeout(esl_handle_t *handle, const char *
 #endif
 	}
 
-	rval = connect(handle->sock, (struct sockaddr*)&handle->sockaddr, sizeof(handle->sockaddr));
+	rval = connect(handle->sock, (struct sockaddr*)&handle->sockaddr, socklen);
 	
 	if (timeout) {
 		int r;

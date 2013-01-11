@@ -876,12 +876,16 @@ SWITCH_DECLARE(switch_bool_t) switch_simple_email(const char *to,
 		}
 	}
 
+	if (fd > -1) {
+		close(fd);
+		fd = -1;
+	}
 
 	if (zstr(from)) {
 		from = "freeswitch";
 	}
 #ifdef WIN32
-	switch_snprintf(buf, B64BUFFLEN, "type %s | %s -f %s %s %s", filename, runtime.mailer_app, from, runtime.mailer_app_args, to);
+	switch_snprintf(buf, B64BUFFLEN, "\"\"%s\" -f %s %s %s < \"%s\"\"", runtime.mailer_app, from, runtime.mailer_app_args, to, filename);
 #else
 	switch_snprintf(buf, B64BUFFLEN, "/bin/cat %s | %s -f %s %s %s", filename, runtime.mailer_app, from, runtime.mailer_app_args, to);
 #endif
@@ -2605,7 +2609,7 @@ const short _switch_C_toupper_[1 + SWITCH_CTYPE_NUM_CHARS] = {
 
 const short *_switch_toupper_tab_ = _switch_C_toupper_;
 
-SWITCH_DECLARE(int) switch_toupper(int c)
+SWITCH_DECLARE(int) old_switch_toupper(int c)
 {
 	if ((unsigned int) c > 255)
 		return (c);
@@ -2652,7 +2656,7 @@ const short _switch_C_tolower_[1 + SWITCH_CTYPE_NUM_CHARS] = {
 
 const short *_switch_tolower_tab_ = _switch_C_tolower_;
 
-SWITCH_DECLARE(int) switch_tolower(int c)
+SWITCH_DECLARE(int) old_switch_tolower(int c)
 {
 	if ((unsigned int) c > 255)
 		return (c);

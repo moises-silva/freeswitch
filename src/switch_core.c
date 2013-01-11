@@ -533,7 +533,7 @@ SWITCH_DECLARE(switch_thread_t *) switch_core_launch_thread(switch_thread_start_
 		ts->objs[0] = obj;
 		ts->objs[1] = thread;
 		switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-		switch_threadattr_priority_increase(thd_attr);
+		switch_threadattr_priority_set(thd_attr, SWITCH_PRI_REALTIME);
 		switch_thread_create(&thread, thd_attr, func, ts, pool);
 	}
 
@@ -572,6 +572,14 @@ SWITCH_DECLARE(void) switch_core_set_globals(void)
 		switch_snprintf(SWITCH_GLOBAL_dirs.mod_dir, BUFSIZE, "%s", SWITCH_MOD_DIR);
 #else
 		switch_snprintf(SWITCH_GLOBAL_dirs.mod_dir, BUFSIZE, "%s%smod", base_dir, SWITCH_PATH_SEPARATOR);
+#endif
+	}
+
+	if (!SWITCH_GLOBAL_dirs.lib_dir && (SWITCH_GLOBAL_dirs.lib_dir = (char *) malloc(BUFSIZE))) {
+#ifdef SWITCH_LIB_DIR
+		switch_snprintf(SWITCH_GLOBAL_dirs.lib_dir, BUFSIZE, "%s", SWITCH_LIB_DIR);
+#else
+		switch_snprintf(SWITCH_GLOBAL_dirs.lib_dir, BUFSIZE, "%s%slib", base_dir, SWITCH_PATH_SEPARATOR);
 #endif
 	}
 
@@ -662,6 +670,9 @@ SWITCH_DECLARE(void) switch_core_set_globals(void)
 #ifdef WIN32
 		GetTempPath(dwBufSize, lpPathBuffer);
 		lpPathBuffer[strlen(lpPathBuffer)-1] = 0;
+		tmp = switch_string_replace(lpPathBuffer, "\\", "/");
+		strcpy(lpPathBuffer, tmp);
+		free(tmp);
 		switch_snprintf(SWITCH_GLOBAL_dirs.temp_dir, BUFSIZE, "%s", lpPathBuffer);
 #else
 		switch_snprintf(SWITCH_GLOBAL_dirs.temp_dir, BUFSIZE, "%s", "/tmp");
@@ -671,6 +682,7 @@ SWITCH_DECLARE(void) switch_core_set_globals(void)
 
 	switch_assert(SWITCH_GLOBAL_dirs.base_dir);
 	switch_assert(SWITCH_GLOBAL_dirs.mod_dir);
+	switch_assert(SWITCH_GLOBAL_dirs.lib_dir);
 	switch_assert(SWITCH_GLOBAL_dirs.conf_dir);
 	switch_assert(SWITCH_GLOBAL_dirs.log_dir);
 	switch_assert(SWITCH_GLOBAL_dirs.run_dir);
@@ -731,32 +743,14 @@ SWITCH_DECLARE(int32_t) set_realtime_priority(void)
 	 * Try to use a round-robin scheduler
 	 * with a fallback if that does not work
 	 */
-	int fd;
-	const char *rt = "/proc/sys/kernel/sched_rt_runtime_us";
-	char data[] = "-1\n";
 	struct sched_param sched = { 0 };
-	sched.sched_priority = 1;
+	sched.sched_priority = SWITCH_PRI_LOW;
 	if (sched_setscheduler(0, SCHED_FIFO, &sched)) {
 		sched.sched_priority = 0;
 		if (sched_setscheduler(0, SCHED_OTHER, &sched)) {
 			return -1;
 		}
 	}
-
-	if ((fd = open(rt, O_WRONLY)) > 0) {
-		int r;
-		
-		if (!(r = write(fd, data, sizeof(data)))) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Error Disablling RT limits [%s][%d]\n", rt, r);
-		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Disabling RT throttling.\n");
-		}
-		close(fd);
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Error opening %s\n", rt);
-	}
-
-	
 #endif
 
 	
@@ -1488,11 +1482,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_init(switch_core_flag_t flags, switc
 	runtime.db_handle_timeout = 5000000;
 	
 	runtime.runlevel++;
-	runtime.sql_buffer_len = 1024 * 32;
-	runtime.max_sql_buffer_len = 1024 * 1024;
 	runtime.dummy_cng_frame.data = runtime.dummy_data;
 	runtime.dummy_cng_frame.datalen = sizeof(runtime.dummy_data);
 	runtime.dummy_cng_frame.buflen = sizeof(runtime.dummy_data);
+	runtime.dbname = "core";
 	switch_set_flag((&runtime.dummy_cng_frame), SFF_CNG);
 	switch_set_flag((&runtime), SCF_AUTO_SCHEMAS);
 	switch_set_flag((&runtime), SCF_CLEAR_SQL);
@@ -1772,37 +1765,6 @@ static void switch_load_core_config(const char *file)
 					
 				} else if (!strcasecmp(var, "multiple-registrations")) {
 					runtime.multiple_registrations = switch_true(val);
-				} else if (!strcasecmp(var, "sql-buffer-len")) {
-					int tmp = atoi(val);
-
-					if (end_of(val) == 'k') {
-						tmp *= 1024;
-					} else if (end_of(val) == 'm') {
-						tmp *= (1024 * 1024);
-					}
-
-					if (tmp >= 32000 && tmp < 10500000) {
-						runtime.sql_buffer_len = tmp;
-					} else {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "sql-buffer-len: Value is not within rage 32k to 10m\n");
-					}
-				} else if (!strcasecmp(var, "max-sql-buffer-len")) {
-					int tmp = atoi(val);
-
-					if (end_of(val) == 'k') {
-						tmp *= 1024;
-					} else if (end_of(val) == 'm') {
-						tmp *= (1024 * 1024);
-					}
-
-					if (tmp < runtime.sql_buffer_len) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Value is not larger than sql-buffer-len\n");
-					} else if (tmp >= 32000 && tmp < 10500000) {
-						runtime.sql_buffer_len = tmp;
-					} else {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "max-sql-buffer-len: Value is not within rage 32k to 10m\n");
-					}
-
 				} else if (!strcasecmp(var, "auto-create-schemas")) {
 					if (switch_true(val)) {
 						switch_set_flag((&runtime), SCF_AUTO_SCHEMAS);
@@ -1928,31 +1890,13 @@ static void switch_load_core_config(const char *file)
 				} else if (!strcasecmp(var, "core-db-name") && !zstr(val)) {
 					runtime.dbname = switch_core_strdup(runtime.memory_pool, val);
 				} else if (!strcasecmp(var, "core-db-dsn") && !zstr(val)) {
-					if (switch_odbc_available()) {
+					if (switch_odbc_available() || switch_pgsql_available()) {
 						runtime.odbc_dsn = switch_core_strdup(runtime.memory_pool, val);
-						if ((runtime.odbc_user = strchr(runtime.odbc_dsn, ':'))) {
-							*runtime.odbc_user++ = '\0';
-							if ((runtime.odbc_pass = strchr(runtime.odbc_user, ':'))) {
-								*runtime.odbc_pass++ = '\0';
-							}
-						}
 					} else {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ODBC IS NOT AVAILABLE!\n");
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ODBC AND PGSQL ARE NOT AVAILABLE!\n");
 					}
-				} else if (!strcasecmp(var, "core-recovery-db-dsn") && !zstr(val)) {
-					if (switch_odbc_available()) {
-						runtime.recovery_odbc_dsn = switch_core_strdup(runtime.memory_pool, val);
-						if ((runtime.recovery_odbc_user = strchr(runtime.recovery_odbc_dsn, ':'))) {
-							*runtime.recovery_odbc_user++ = '\0';
-							if ((runtime.recovery_odbc_pass = strchr(runtime.recovery_odbc_user, ':'))) {
-								*runtime.recovery_odbc_pass++ = '\0';
-							}
-						}
-					} else {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ODBC IS NOT AVAILABLE!\n");
-					}
-				} else if (!strcasecmp(var, "core-odbc-required") && !zstr(val)) {
-					switch_set_flag((&runtime), SCF_CORE_ODBC_REQ);
+				} else if (!strcasecmp(var, "core-non-sqlite-db-required") && !zstr(val)) {
+					switch_set_flag((&runtime), SCF_CORE_NON_SQLITE_DB_REQ);
 				} else if (!strcasecmp(var, "core-dbtype") && !zstr(val)) {
 					if (!strcasecmp(val, "MSSQL")) {
 						runtime.odbc_dbtype = DBTYPE_MSSQL;
@@ -2292,9 +2236,9 @@ SWITCH_DECLARE(int32_t) switch_core_session_ctl(switch_session_ctl_t cmd, void *
 		break;
 	case SCSC_SQL:
 		if (oldintval) {
-			switch_core_sqldb_start_thread();
+			switch_core_sqldb_resume();
 		} else {
-			switch_core_sqldb_stop_thread();
+			switch_core_sqldb_pause();
 		}
 		break;
 	case SCSC_PAUSE_ALL:
@@ -2482,6 +2426,11 @@ SWITCH_DECLARE(int32_t) switch_core_session_ctl(switch_session_ctl_t cmd, void *
 SWITCH_DECLARE(switch_core_flag_t) switch_core_flags(void)
 {
 	return runtime.flags;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_running(void)
+{
+	return runtime.running ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 SWITCH_DECLARE(switch_bool_t) switch_core_ready(void)
@@ -2731,14 +2680,32 @@ SWITCH_DECLARE(void) switch_close_extra_files(int *keep, int keep_ttl)
 }
 
 
-
 #ifdef WIN32
 static int switch_system_fork(const char *cmd, switch_bool_t wait)
 {
 	return switch_system_thread(cmd, wait);
 }
 
+SWITCH_DECLARE(pid_t) switch_fork(void)
+{
+	return -1;
+}
+
+
 #else
+
+SWITCH_DECLARE(pid_t) switch_fork(void)
+{
+	int i = fork();
+
+	if (!i) {
+		set_low_priority();
+	}
+
+	return i;
+}
+
+
 
 static int switch_system_fork(const char *cmd, switch_bool_t wait)
 {
@@ -2747,7 +2714,7 @@ static int switch_system_fork(const char *cmd, switch_bool_t wait)
 
 	switch_core_set_signal_handlers();
 
-	pid = fork();
+	pid = switch_fork();
 	
 	if (pid) {
 		if (wait) {
@@ -2757,7 +2724,6 @@ static int switch_system_fork(const char *cmd, switch_bool_t wait)
 	} else {
 		switch_close_extra_files(NULL, 0);
 		
-		set_low_priority();
 		if (system(dcmd) == -1) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to execute because of a command error : %s\n", dcmd);
 		}
@@ -2793,7 +2759,7 @@ SWITCH_DECLARE(int) switch_stream_system_fork(const char *cmd, switch_stream_han
 	if (pipe(fds)) {
 		goto end;
 	} else {					/* good to go */
-		pid = fork();
+		pid = switch_fork();
 
 		if (pid < 0) {			/* ok maybe not */
 			close(fds[0]);

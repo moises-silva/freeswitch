@@ -207,6 +207,7 @@ static int parse_debug(const char *in, uint32_t *flags)
 	return res;
 }
 
+#ifdef HAVE_LIBPRI_MAINT_SERVICE
 /**
  * \brief Parses a change status string to flags
  * \param in change status string to parse for
@@ -232,6 +233,8 @@ static int parse_change_status(const char *in)
 
 	return flags;
 }
+#endif
+
 
 static int print_debug(uint32_t flags, char *tmp, const int size)
 {
@@ -441,7 +444,9 @@ static const char *ftdm_libpri_usage =
 	"libpri kill <span>\n"
 	"libpri reset <span>\n"
 	"libpri restart <span> <channel/all>\n"
+#ifdef HAVE_LIBPRI_MAINT_SERVICE
 	"libpri maintenance <span> <channel/all> <in/maint/out>\n"
+#endif
 	"libpri debug <span> [all|none|flag,...flagN]\n"
 	"libpri msn <span>\n"
 	"\n"
@@ -650,6 +655,7 @@ static FIO_API_FUNCTION(ftdm_libpri_api)
 				goto done;
 			}
 		}
+#ifdef HAVE_LIBPRI_MAINT_SERVICE
 		if (!strcasecmp(argv[0], "maintenance") && argc > 3) {
 			ftdm_span_t *span = NULL;
 			if (ftdm_span_find_by_name(argv[1], &span) == FTDM_SUCCESS) {
@@ -681,6 +687,7 @@ static FIO_API_FUNCTION(ftdm_libpri_api)
 				goto done;
 			}
 		}
+#endif
 	} else {
 		/* zero args print usage */
 		stream->write_function(stream, ftdm_libpri_usage);
@@ -942,7 +949,7 @@ static ftdm_status_t state_advance(ftdm_channel_t *chan)
 				ftdm_channel_t *chtmp = chan;
 
 				if (call) {
-					pri_destroycall(isdn_data->spri.pri, call);
+					/* pri call destroy is done by libpri itself (on release_ack) */
 					chan_priv->call = NULL;
 				}
 
@@ -952,6 +959,9 @@ static ftdm_status_t state_advance(ftdm_channel_t *chan)
 				/* Stop T316 and reset counter */
 				lpwrap_stop_timer(&isdn_data->spri, &chan_priv->t316);
 				chan_priv->t316_timeout_cnt = 0;
+
+				/* Unset remote hangup */
+				chan_priv->peerhangup = 0;
 
 				if (ftdm_channel_close(&chtmp) != FTDM_SUCCESS) {
 					ftdm_log(FTDM_LOG_WARNING, "-- Failed to close channel %d:%d\n",
@@ -974,7 +984,13 @@ static ftdm_status_t state_advance(ftdm_channel_t *chan)
 					ftdm_set_state_locked(chan, FTDM_CHANNEL_STATE_HANGUP);
 				}
 			} else if (call) {
-				pri_progress(isdn_data->spri.pri, call, ftdm_channel_get_id(chan), 0);
+				/*
+				 * Even if we have no media, sending progress without PI is forbidden
+				 * by Q.931 3.1.8, so a protocol error will be issued from libpri
+				 * and from remote equipment.
+				 * So just pretend we have PI.
+				 */
+				pri_progress(isdn_data->spri.pri, call, ftdm_channel_get_id(chan), 1);
 			} else {
 				ftdm_set_state_locked(chan, FTDM_CHANNEL_STATE_RESTART);
 			}
@@ -1200,12 +1216,21 @@ static ftdm_status_t state_advance(ftdm_channel_t *chan)
 		{
 			if (call) {
 				ftdm_caller_data_t *caller_data = ftdm_channel_get_caller_data(chan);
-
 				pri_hangup(isdn_data->spri.pri, call, caller_data->hangup_cause);
-//				pri_destroycall(isdn_data->spri.pri, call);
-//				chan_priv->call = NULL;
+
+				if (chan_priv->peerhangup) {
+					/* Call is inbound and hangup has been initiated by peer */
+					if (!ftdm_test_flag(chan, FTDM_CHANNEL_OUTBOUND)) {
+						ftdm_set_state_locked(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
+					} else if (caller_data->hangup_cause == PRI_CAUSE_NO_USER_RESPONSE) {
+						/* Can happen when we have a DL link expire or some timer expired */
+						ftdm_set_state_locked(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
+					} else if (caller_data->hangup_cause == PRI_CAUSE_DESTINATION_OUT_OF_ORDER) {
+						/* Can happen when we have a DL link expire or some timer expired */
+						ftdm_set_state_locked(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
+					}
+				}
 			}
-			ftdm_set_state_locked(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
 		}
 		break;
 
@@ -1362,6 +1387,7 @@ static int on_hangup(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri_even
 {
 	ftdm_span_t *span = spri->span;
 	ftdm_channel_t *chan = ftdm_span_get_channel(span, pevent->hangup.channel);
+	ftdm_libpri_b_chan_t *chan_priv = chan->call_data;
 
 	if (!chan) {
 		ftdm_log(FTDM_LOG_CRIT, "-- Hangup on channel %d:%d but it's not in use?\n", ftdm_span_get_id(spri->span), pevent->hangup.channel);
@@ -1380,8 +1406,6 @@ static int on_hangup(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri_even
 		ftdm_log(FTDM_LOG_DEBUG, "-- Hangup REQ on channel %d:%d\n",
 			ftdm_span_get_id(spri->span), pevent->hangup.channel);
 
-		pri_hangup(spri->pri, pevent->hangup.call, pevent->hangup.cause);
-
 		chan->caller_data.hangup_cause = pevent->hangup.cause;
 
 		switch (ftdm_channel_get_state(chan)) {
@@ -1394,18 +1418,26 @@ static int on_hangup(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri_even
 		}
 		break;
 
-	case LPWRAP_PRI_EVENT_HANGUP_ACK:	/* */
+	case LPWRAP_PRI_EVENT_HANGUP_ACK:	/* RELEASE_COMPLETE */
 		ftdm_log(FTDM_LOG_DEBUG, "-- Hangup ACK on channel %d:%d\n",
 			ftdm_span_get_id(spri->span), pevent->hangup.channel);
 
-		pri_hangup(spri->pri, pevent->hangup.call, pevent->hangup.cause);
-
-		ftdm_set_state(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
+		switch (ftdm_channel_get_state(chan)) {
+			case FTDM_CHANNEL_STATE_RESTART:
+				/* ACK caused by DL FAILURE in DISC REQ */
+				ftdm_set_state(chan, FTDM_CHANNEL_STATE_DOWN);
+				break;
+			default:
+				ftdm_set_state(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
+				break;
+		}
 		break;
 
 	case LPWRAP_PRI_EVENT_HANGUP:	/* "RELEASE/RELEASE_COMPLETE/other" */
 		ftdm_log(FTDM_LOG_DEBUG, "-- Hangup on channel %d:%d\n",
 			ftdm_span_get_id(spri->span), pevent->hangup.channel);
+
+		chan_priv->peerhangup = 1;
 
 		switch (ftdm_channel_get_state(chan)) {
 		case FTDM_CHANNEL_STATE_DIALING:
@@ -1418,8 +1450,18 @@ static int on_hangup(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri_even
 			ftdm_set_state(chan, FTDM_CHANNEL_STATE_TERMINATING);
 			break;
 		case FTDM_CHANNEL_STATE_HANGUP:
+			/* this will send "RELEASE_COMPLETE", eventually */
+			pri_hangup(spri->pri, pevent->hangup.call, chan->caller_data.hangup_cause);
 			chan->caller_data.hangup_cause = pevent->hangup.cause;
 			ftdm_set_state(chan, FTDM_CHANNEL_STATE_HANGUP_COMPLETE);
+			break;
+		case FTDM_CHANNEL_STATE_RESTART:
+			/*
+			 * We got an hungup doing a restart, normally beacause link has been lost during
+			 * a call and the T309 timer has expired. So destroy it :) (DL_RELEASE_IND)
+			 */
+			pri_destroycall(spri->pri, pevent->hangup.call);
+			ftdm_set_state(chan, FTDM_CHANNEL_STATE_DOWN);
 			break;
 //		case FTDM_CHANNEL_STATE_TERMINATING:
 //			ftdm_set_state(chan, FTDM_CHANNEL_STATE_HANGUP);
@@ -2132,7 +2174,7 @@ static int on_restart_ack(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri
 /*
  * FACILITY Advice-On-Charge handler
  */
-#ifdef HAVE_LIBPRI_AOC
+#if defined(HAVE_LIBPRI_AOC) && defined(PRI_EVENT_FACILITY)
 static const char *aoc_billing_id(const int id)
 {
 	switch (id) {
@@ -2249,7 +2291,9 @@ static int handle_facility_aoc_e(const struct pri_subcmd_aoc_e *aoc_e)
 	ftdm_log(FTDM_LOG_INFO, "AOC-E:\n%s", tmp);
 	return 0;
 }
+#endif
 
+#ifdef PRI_EVENT_FACILITY
 /**
  * \brief Handler for libpri facility events
  * \param spri Pri wrapper structure (libpri, span, dchan)
@@ -2275,6 +2319,7 @@ static int on_facility(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri_ev
 		int res = -1;
 
 		switch (sub->cmd) {
+#ifdef HAVE_LIBPRI_AOC
 		case PRI_SUBCMD_AOC_S:	/* AOC-S: Start of call */
 			res = handle_facility_aoc_s(&sub->u.aoc_s);
 			break;
@@ -2293,6 +2338,7 @@ static int on_facility(lpwrap_pri_t *spri, lpwrap_pri_event_t event_type, pri_ev
 					sub->u.aoc_request_response.charging_request,
 					sub->u.aoc_request_response.charging_response);
 			break;
+#endif
 		default:
 			ftdm_log(FTDM_LOG_DEBUG, "FACILITY subcommand %d is not implemented, ignoring\n", sub->cmd);
 		}
@@ -2489,10 +2535,12 @@ static void *ftdm_libpri_run(ftdm_thread_t *me, void *obj)
 		pri_facility_enable(isdn_data->spri.pri);
 	}
 #endif
+#ifdef HAVE_LIBPRI_MAINT_SERVICE
 	/* Support the different switch of service status */
 	if (isdn_data->service_message_support) {
 		pri_set_service_message_support(isdn_data->spri.pri, 1);
 	}
+#endif
 
 	/* Callbacks for libpri events */
 	LPWRAP_MAP_PRI_EVENT(isdn_data->spri, LPWRAP_PRI_EVENT_ANY, on_anything);
@@ -2511,7 +2559,9 @@ static void *ftdm_libpri_run(ftdm_thread_t *me, void *obj)
 	LPWRAP_MAP_PRI_EVENT(isdn_data->spri, LPWRAP_PRI_EVENT_RESTART, on_restart);
 	LPWRAP_MAP_PRI_EVENT(isdn_data->spri, LPWRAP_PRI_EVENT_RESTART_ACK, on_restart_ack);
 	LPWRAP_MAP_PRI_EVENT(isdn_data->spri, LPWRAP_PRI_EVENT_IO_FAIL, on_io_fail);
+#ifdef PRI_EVENT_FACILITY
 	LPWRAP_MAP_PRI_EVENT(isdn_data->spri, LPWRAP_PRI_EVENT_FACILITY, on_facility);
+#endif
 
 	/* Callback invoked on each iteration of the lpwrap_run_pri() event loop */
 	isdn_data->spri.on_loop = check_flags;

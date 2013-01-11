@@ -6,7 +6,7 @@
 
 FS_CC?=gcc
 FS_CXX?=g++
-FS_CFLAGS?=-ggdb3 -O2
+FS_CFLAGS?=-ggdb3 -O2 -fPIC
 FS_CPPFLAGS?=
 FS_CXXFLAGS?=$(FS_CFLAGS)
 export PATH?=/usr/lib/ccache:/usr/sbin:/usr/bin:/sbin:/bin
@@ -64,6 +64,7 @@ override_dh_auto_clean:
 		--host=$(DEB_HOST_GNU_TYPE) --build=$(DEB_BUILD_GNU_TYPE) \
 		--with-gnu-ld --with-python --with-erlang --with-openssl \
 		--enable-core-odbc-support --enable-zrtp \
+		--enable-core-pgsql-support \
 		--prefix=/usr --localstatedir=/var \
 		--sysconfdir=/etc/freeswitch \
 		--with-modinstdir=/usr/lib/freeswitch/mod \

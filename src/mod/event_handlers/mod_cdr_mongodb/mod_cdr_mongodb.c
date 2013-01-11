@@ -22,7 +22,7 @@
  * the Initial Developer. All Rights Reserved.
  *
  * Contributor(s):
- * Daniel Swarbrick <daniel.swarbrick@seventhsignal.de>
+ * Daniel Swarbrick <daniel.swarbrick@gmail.com>
  * 
  * mod_cdr_mongodb.c -- MongoDB CDR Module
  *
@@ -33,12 +33,17 @@
 #include <switch.h>
 #include <mongo.h>
 
+#define MONGO_REPLSET_MAX_MEMBERS 12
+
 static struct {
 	switch_memory_pool_t *pool;
 	int shutdown;
 	char *mongo_host;
-	uint32_t mongo_port;
+	int mongo_port;
 	char *mongo_namespace;
+	char *mongo_replset_name;
+	char *mongo_username;
+	char *mongo_password;
 	mongo mongo_conn[1];
 	switch_mutex_t *mongo_mutex;
 	switch_bool_t log_b;
@@ -48,9 +53,12 @@ static switch_xml_config_item_t config_settings[] = {
 	/* key, flags, ptr, default_value, syntax, helptext */
 	SWITCH_CONFIG_ITEM_STRING_STRDUP("host", CONFIG_REQUIRED, &globals.mongo_host, "127.0.0.1", NULL, "MongoDB server host address"),
 	SWITCH_CONFIG_ITEM_STRING_STRDUP("namespace", CONFIG_REQUIRED, &globals.mongo_namespace, NULL, "database.collection", "MongoDB namespace"),
+	SWITCH_CONFIG_ITEM_STRING_STRDUP("replica_set_name", CONFIG_RELOADABLE, &globals.mongo_replset_name, "cdr_mongodb", NULL, "MongoDB replica set name"),
+	SWITCH_CONFIG_ITEM_STRING_STRDUP("username", CONFIG_RELOADABLE, &globals.mongo_username, NULL, NULL, "MongoDB username"),
+	SWITCH_CONFIG_ITEM_STRING_STRDUP("password", CONFIG_RELOADABLE, &globals.mongo_password, NULL, NULL, "MongoDB password"),
 
 	/* key, type, flags, ptr, default_value, data, syntax, helptext */
-	SWITCH_CONFIG_ITEM("port", SWITCH_CONFIG_INT, CONFIG_REQUIRED, &globals.mongo_port, 27017, NULL, NULL, "MongoDB server TCP port"),
+	SWITCH_CONFIG_ITEM("port", SWITCH_CONFIG_INT, CONFIG_REQUIRED, &globals.mongo_port, MONGO_DEFAULT_PORT, NULL, NULL, "MongoDB server TCP port"),
 	SWITCH_CONFIG_ITEM("log-b-leg", SWITCH_CONFIG_BOOL, CONFIG_RELOADABLE, &globals.log_b, SWITCH_TRUE, NULL, NULL, "Log B-leg in addition to A-leg"),
 
 	SWITCH_CONFIG_ITEM_END()
@@ -79,6 +87,29 @@ static void set_bson_profile_data(bson *b, switch_caller_profile_t *caller_profi
 }
 
 
+static switch_status_t cdr_mongo_authenticate() {
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	mongo_error_t db_status;
+	char *ns_tmp, *ns_split[2];
+
+	/* Split namespace db.collection into separate vars */
+	switch_strdup(ns_tmp, globals.mongo_namespace);
+	switch_separate_string(ns_tmp, '.', ns_split, 2);
+
+	db_status = mongo_cmd_authenticate(globals.mongo_conn, ns_split[0], globals.mongo_username, globals.mongo_password);
+
+	if (db_status != MONGO_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_cmd_authenticate: authentication failed\n");
+		status = SWITCH_STATUS_FALSE;
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Successfully authenticated %s@%s\n", globals.mongo_username, ns_split[0]);
+	}
+
+	switch_safe_free(ns_tmp);
+	return status;
+}
+
+
 static switch_status_t my_on_reporting(switch_core_session_t *session)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -88,7 +119,10 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 	switch_app_log_t *app_log;
 	bson cdr;
 	int is_b;
+	int callflow_idx = 0;
+	switch_hold_record_t *hold_record = switch_channel_get_hold_record(channel), *hr;
 	char *tmp;
+	char idx_buffer[4];
 
 	if (globals.shutdown) {
 		return SWITCH_STATUS_SUCCESS;
@@ -139,26 +173,52 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 
 	/* App log */
 	if ((app_log = switch_core_session_get_app_log(session))) {
+		int idx = 0;
 		switch_app_log_t *ap;
 
-		bson_append_start_object(&cdr, "app_log");
+		bson_append_start_array(&cdr, "app_log");
+
 		for (ap = app_log; ap; ap = ap->next) {
-			bson_append_start_object(&cdr, "application");
+			switch_snprintf(idx_buffer, sizeof(idx_buffer), "%d", idx);
+			bson_append_start_object(&cdr, idx_buffer);
 			bson_append_string(&cdr, "app_name", ap->app);
 			bson_append_string(&cdr, "app_data", switch_str_nil(ap->arg));
 			bson_append_long(&cdr, "app_stamp", ap->stamp);
 			bson_append_finish_object(&cdr);		/* application */
+			idx++;
 		}
 
-		bson_append_finish_object(&cdr);			/* app_log */
+		bson_append_finish_array(&cdr);			/* app_log */
+	}
+
+	/* Hold */
+	if (hold_record) {
+		int idx = 0;
+		bson_append_start_array(&cdr, "hold_record");
+		for (hr = hold_record; hr ; hr = hr->next) {
+			switch_snprintf(idx_buffer, sizeof(idx_buffer), "%d", idx);
+			bson_append_start_object(&cdr, idx_buffer);
+			bson_append_long(&cdr, "on", hr->on);
+			bson_append_long(&cdr, "off", hr->off);
+			if (hr->uuid) {
+				bson_append_string(&cdr, "bridged_to", hr->uuid);
+			}
+			bson_append_finish_object(&cdr);
+			idx++;
+		}
+		bson_append_finish_array(&cdr);
 	}
 
 
 	/* Callflow */
 	caller_profile = switch_channel_get_caller_profile(channel);
 
+	/* Start callflow array */
+	bson_append_start_array(&cdr, "callflow");
+	
 	while (caller_profile) {
-		bson_append_start_object(&cdr, "callflow");
+		snprintf(idx_buffer, sizeof(idx_buffer), "%d", callflow_idx);
+		bson_append_start_object(&cdr, idx_buffer);
 
 		if (!zstr(caller_profile->dialplan)) {
 			bson_append_string(&cdr, "dialplan", caller_profile->dialplan);
@@ -173,8 +233,8 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 
 			bson_append_start_object(&cdr, "extension");
 
-			bson_append_string(&cdr, "name", caller_profile->caller_extension->extension_name);
-			bson_append_string(&cdr, "number", caller_profile->caller_extension->extension_number);
+			bson_append_string(&cdr, "name", switch_str_nil(caller_profile->caller_extension->extension_name));
+			bson_append_string(&cdr, "number", switch_str_nil(caller_profile->caller_extension->extension_number));
 
 			if (caller_profile->caller_extension->current_application) {
 				bson_append_string(&cdr, "current_app", caller_profile->caller_extension->current_application->application_name);
@@ -231,37 +291,49 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 		set_bson_profile_data(&cdr, caller_profile);
 
 		if (caller_profile->origination_caller_profile) {
+			int idx = 0;
 			switch_caller_profile_t *cp = NULL;
 
-			bson_append_start_object(&cdr, "origination");
+			/* Start origination array */
+			bson_append_start_array(&cdr, "origination");
 			for (cp = caller_profile->origination_caller_profile; cp; cp = cp->next) {
-				bson_append_start_object(&cdr, "origination_caller_profile");
+				snprintf(idx_buffer, sizeof(idx_buffer), "%d", idx);
+				bson_append_start_object(&cdr, idx_buffer);
 				set_bson_profile_data(&cdr, cp);
 				bson_append_finish_object(&cdr);
+				idx++;
 			}
 			bson_append_finish_object(&cdr);			/* origination */
 		}
 
 		if (caller_profile->originator_caller_profile) {
+			int idx = 0;
 			switch_caller_profile_t *cp = NULL;
 
-			bson_append_start_object(&cdr, "originator");
+			/* Start originator array */
+			bson_append_start_array(&cdr, "originator");
 			for (cp = caller_profile->originator_caller_profile; cp; cp = cp->next) {
-				bson_append_start_object(&cdr, "originator_caller_profile");
+				snprintf(idx_buffer, sizeof(idx_buffer), "%d", idx);
+				bson_append_start_object(&cdr, idx_buffer);
 				set_bson_profile_data(&cdr, cp);
 				bson_append_finish_object(&cdr);
+				idx++;
 			}
 			bson_append_finish_object(&cdr);			/* originator */
 		}
 
 		if (caller_profile->originatee_caller_profile) {
+			int idx = 0;
 			switch_caller_profile_t *cp = NULL;
 
-			bson_append_start_object(&cdr, "originatee");
+			/* Start originatee array */
+			bson_append_start_array(&cdr, "originatee");
 			for (cp = caller_profile->originatee_caller_profile; cp; cp = cp->next) {
-				bson_append_start_object(&cdr, "originatee_caller_profile");
+				snprintf(idx_buffer, sizeof(idx_buffer), "%d", idx);
+				bson_append_start_object(&cdr, idx_buffer);
 				set_bson_profile_data(&cdr, cp);
 				bson_append_finish_object(&cdr);
+				idx++;
 			}
 			bson_append_finish_object(&cdr);			/* originatee */
 		}
@@ -289,13 +361,16 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 
 		bson_append_finish_object(&cdr);				/* callflow */
 		caller_profile = caller_profile->next;
+		callflow_idx++;	/* increment callflow_idx */
 	}
+
+	bson_append_finish_array(&cdr);
 
 	bson_finish(&cdr);
 
 	switch_mutex_lock(globals.mongo_mutex);
 
-	if (mongo_insert(globals.mongo_conn, globals.mongo_namespace, &cdr) != MONGO_OK) {
+	if (mongo_insert(globals.mongo_conn, globals.mongo_namespace, &cdr, NULL) != MONGO_OK) {
 		if (globals.mongo_conn->err == MONGO_IO_ERROR) {
 			mongo_error_t db_status;
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "MongoDB connection failed; attempting reconnect...\n");
@@ -306,14 +381,20 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 				status = SWITCH_STATUS_FALSE;
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "MongoDB connection re-established.\n");
-				if (mongo_insert(globals.mongo_conn, globals.mongo_namespace, &cdr) != MONGO_OK) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_insert: error code %d\n", globals.mongo_conn->err);
+
+				/* Re-authentication is necessary after a reconnect */
+				if (globals.mongo_username && globals.mongo_password) {
+					status = cdr_mongo_authenticate();
+				}
+
+				if (mongo_insert(globals.mongo_conn, globals.mongo_namespace, &cdr, NULL) != MONGO_OK) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_insert: %s (error code %d)\n", globals.mongo_conn->errstr, globals.mongo_conn->err);
 					status = SWITCH_STATUS_FALSE;
 				}
 			}
 
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_insert: error code %d\n", globals.mongo_conn->err);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_insert: %s (error code %d)\n", globals.mongo_conn->errstr, globals.mongo_conn->err);
 			status = SWITCH_STATUS_FALSE;
 		}
 	}
@@ -356,6 +437,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_cdr_mongodb_load)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	mongo_error_t db_status;
+	char *repl_hosts[MONGO_REPLSET_MAX_MEMBERS];
+	char *mongo_host[2];
+	int num_hosts, mongo_port;
 
 	memset(&globals, 0, sizeof(globals));
 	globals.pool = pool;
@@ -364,7 +448,32 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_cdr_mongodb_load)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	db_status = mongo_connect(globals.mongo_conn, globals.mongo_host, globals.mongo_port);
+	num_hosts = switch_separate_string(globals.mongo_host, ',', repl_hosts, MONGO_REPLSET_MAX_MEMBERS);
+
+	if (num_hosts > 1) {
+		int i;
+
+		mongo_replset_init(globals.mongo_conn, globals.mongo_replset_name);
+
+		for (i = 0; i < num_hosts; i++) {
+			switch_separate_string(repl_hosts[i], ':', mongo_host, 2);
+			mongo_port = mongo_host[1] ? atoi(mongo_host[1]) : globals.mongo_port;
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Adding MongoDB server %s:%d to replica set\n", mongo_host[0], mongo_port);
+			mongo_replset_add_seed(globals.mongo_conn, mongo_host[0], mongo_port);
+		}
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Connecting to MongoDB replica set %s\n", globals.mongo_replset_name);
+		db_status = mongo_replset_connect(globals.mongo_conn);
+	} else {
+		switch_separate_string(globals.mongo_host, ':', mongo_host, 2);
+
+		if (mongo_host[1]) {
+			globals.mongo_port = atoi(mongo_host[1]);
+		}
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Connecting to MongoDB server %s:%d\n", globals.mongo_host, globals.mongo_port);
+		db_status = mongo_connect(globals.mongo_conn, globals.mongo_host, globals.mongo_port);
+	}
 
 	if (db_status != MONGO_OK) {
 		switch (globals.mongo_conn->err) {
@@ -374,15 +483,30 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_cdr_mongodb_load)
 			case MONGO_CONN_FAIL:
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_connect: connection failed\n");
 				break;
+			case MONGO_CONN_ADDR_FAIL:
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_connect: hostname lookup failed\n");
+				break;
 			case MONGO_CONN_NOT_MASTER:
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_connect: not master\n");
 				break;
+			case MONGO_CONN_BAD_SET_NAME:
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_replset_connect: configured replica set name does not match\n");
+				break;
+			case MONGO_CONN_NO_PRIMARY:
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_replset_connect: cannot find replica set primary member\n");
+				break;
 			default:
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_connect: unknown error %d\n", db_status);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mongo_connect: unknown error: status code %d, error code %d\n", db_status, globals.mongo_conn->err);
 		}
 		return SWITCH_STATUS_FALSE;
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Connected to MongoDB server %s:%d\n", globals.mongo_host, globals.mongo_port);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Connection established\n");
+	}
+
+	if (globals.mongo_username && globals.mongo_password) {
+		if (cdr_mongo_authenticate() != SWITCH_STATUS_SUCCESS) {
+			return SWITCH_STATUS_FALSE;
+		}
 	}
 
 	switch_mutex_init(&globals.mongo_mutex, SWITCH_MUTEX_NESTED, pool);

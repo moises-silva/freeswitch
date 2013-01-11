@@ -175,13 +175,8 @@ static switch_status_t socket_logger(const switch_log_node_t *node, switch_log_l
 			if (switch_queue_trypush(l->log_queue, dnode) == SWITCH_STATUS_SUCCESS) {
 				if (l->lost_logs) {
 					int ll = l->lost_logs;
-					switch_event_t *event;
 					l->lost_logs = 0;
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Lost %d log lines!\n", ll);
-					if (switch_event_create(&event, SWITCH_EVENT_TRAP) == SWITCH_STATUS_SUCCESS) {
-						switch_event_add_header(event, SWITCH_STACK_BOTTOM, "info", "lost %d log lines", ll);
-						switch_event_fire(&event);
-					}
 				}
 			} else {
 				switch_log_node_free(&dnode);
@@ -366,7 +361,7 @@ static void event_handler(switch_event_t *event)
 
 		if (send && switch_test_flag(l, LFLAG_MYEVENTS)) {
 			char *uuid = switch_event_get_header(event, "unique-id");
-			if (!uuid || strcmp(uuid, switch_core_session_get_uuid(l->session))) {
+			if (!uuid || (l->session && strcmp(uuid, switch_core_session_get_uuid(l->session)))) {
 				send = 0;
 			}
 		}
@@ -378,11 +373,6 @@ static void event_handler(switch_event_t *event)
 						int le = l->lost_events;
 						l->lost_events = 0;
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(l->session), SWITCH_LOG_CRIT, "Lost %d events!\n", le);
-						clone = NULL;
-						if (switch_event_create(&clone, SWITCH_EVENT_TRAP) == SWITCH_STATUS_SUCCESS) {
-							switch_event_add_header(clone, SWITCH_STACK_BOTTOM, "info", "lost %d events", le);
-							switch_event_fire(&clone);
-						}
 					}
 				} else {
 					if (++l->lost_events > MAX_MISSED) {
@@ -2799,6 +2789,13 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_event_socket_runtime)
 		rv = switch_socket_opt_set(listen_list.sock, SWITCH_SO_REUSEADDR, 1);
 		if (rv)
 			goto sock_fail;
+#ifdef WIN32
+		/* Enable dual-stack listening on Windows (if the listening address is IPv6), it's default on Linux */
+		if (switch_sockaddr_get_family(sa) == AF_INET6) {
+			rv = switch_socket_opt_set(listen_list.sock, 16384, 0);
+			if (rv) goto sock_fail;
+		}
+#endif
 		rv = switch_socket_bind(listen_list.sock, sa);
 		if (rv)
 			goto sock_fail;

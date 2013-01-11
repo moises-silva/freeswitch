@@ -183,18 +183,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_read(switch_media_bug_t *b
 
 	bytes = read_impl.decoded_bytes_per_packet;
 
-#ifdef TESTINGONLY
-	if (0 && bug->session->recur_buffer_len) {
-		frame->datalen = bug->session->recur_buffer_len;
-		frame->samples = bug->session->recur_buffer_len / sizeof(int16_t);
-		frame->rate = read_impl.actual_samples_per_second;
-		frame->codec = NULL;
-		memcpy(frame->data, bug->session->recur_buffer, bug->session->recur_buffer_len);
-		return SWITCH_STATUS_SUCCESS;
-	}
-#endif
-
-
 	if (frame->buflen < bytes) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_ERROR, "%s frame buffer too small!\n",
 						  switch_channel_get_name(bug->session->channel));
@@ -232,26 +220,34 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_read(switch_media_bug_t *b
 	}
 
 	if (!bug->record_frame_size) {
-		if (do_read && do_write) {
-			switch_size_t frame_size;
-			switch_codec_implementation_t read_impl = { 0 };
-			switch_codec_implementation_t other_read_impl = { 0 };
-			switch_core_session_t *other_session;
+		switch_size_t frame_size;
+		switch_codec_implementation_t read_impl = { 0 };
+		//switch_codec_implementation_t other_read_impl = { 0 };
+		//switch_core_session_t *other_session;
 			
-			switch_core_session_get_read_impl(bug->session, &read_impl);
-			frame_size = read_impl.decoded_bytes_per_packet;
-			
+		switch_core_session_get_read_impl(bug->session, &read_impl);
+		frame_size = read_impl.decoded_bytes_per_packet;
+		bug->record_frame_size = frame_size;
+#if 0
+		if (do_read && do_write) {			
 			if (switch_core_session_get_partner(bug->session, &other_session) == SWITCH_STATUS_SUCCESS) {
 				switch_core_session_get_read_impl(other_session, &other_read_impl);
 				switch_core_session_rwunlock(other_session);
-				
-				if (read_impl.decoded_bytes_per_packet < other_read_impl.decoded_bytes_per_packet) {
-					frame_size = other_read_impl.decoded_bytes_per_packet;
+
+				if (read_impl.actual_samples_per_second == other_read_impl.actual_samples_per_second) {
+					if (read_impl.decoded_bytes_per_packet < other_read_impl.decoded_bytes_per_packet) {
+						frame_size = read_impl.decoded_bytes_per_packet;
+					}					
+				} else {
+					if (read_impl.decoded_bytes_per_packet > other_read_impl.decoded_bytes_per_packet) {
+						frame_size = read_impl.decoded_bytes_per_packet;
+					}
 				}
 			}
-			
+
 			bug->record_frame_size = frame_size;
 		}
+#endif
 	}
 
 
@@ -566,7 +562,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_recordings(switch
 		switch_thread_rwlock_unlock(orig_session->bug_rwlock);
 
 		for(i = 0; i < x; i++) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(orig_session), SWITCH_LOG_CRIT, "Transfering %s from %s to %s\n", list[i],
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(orig_session), SWITCH_LOG_DEBUG, "Transfering %s from %s to %s\n", list[i],
 							  switch_core_session_get_name(orig_session), switch_core_session_get_name(new_session));
 			switch_ivr_stop_record_session(orig_session, list[i]);
 			switch_ivr_record_session(new_session, list[i], stop_times[i], NULL);

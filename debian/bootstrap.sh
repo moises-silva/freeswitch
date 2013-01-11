@@ -15,7 +15,6 @@ avoid_mods=(
   applications/mod_rad_auth
   applications/mod_skel
   asr_tts/mod_cepstral
-  asr_tts/mod_flite
   codecs/mod_com_g729
   codecs/mod_ilbc
   codecs/mod_sangoma_codec
@@ -175,8 +174,8 @@ Build-Depends:
  libc6-dev (>= 2.11.3), make (>= 3.81),
  wget, pkg-config,
 # configure options
- libssl-dev, unixodbc-dev,
- libncurses5-dev, libjpeg62-dev,
+ libssl-dev, unixodbc-dev, libpq-dev,
+ libncurses5-dev, libjpeg62-dev | libjpeg8-dev,
  python-dev, erlang-dev,
 # documentation
  doxygen,
