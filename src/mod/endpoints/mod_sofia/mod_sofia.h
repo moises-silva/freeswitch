@@ -92,6 +92,7 @@ typedef struct private_object private_object_t;
 #define MY_EVENT_RECOVERY_SEND "sofia::recovery_send"
 #define MY_EVENT_RECOVERY_RECOVERED "sofia::recovery_recovered"
 #define MY_EVENT_ERROR "sofia::error"
+#define MY_EVENT_NOTIFY_WATCHED_HEADER "sofia::notify_watched_header"
 
 #define MULTICAST_EVENT "multicast::event"
 #define SOFIA_REPLACES_HEADER "_sofia_replaces_"
@@ -844,6 +845,7 @@ struct private_object {
 	switch_payload_t ianacodes[SWITCH_MAX_CODECS];
 	uint32_t session_timeout;
 	enum nua_session_refresher session_refresher;
+	char **watch_headers;
 	/** ZRTP **/
 	char *local_sdp_audio_zrtp_hash;
 	char *local_sdp_video_zrtp_hash;
