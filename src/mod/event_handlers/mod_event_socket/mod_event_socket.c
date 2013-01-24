@@ -318,13 +318,15 @@ static void event_handler(switch_event_t *event)
 				for (hp = l->filters->headers; hp; hp = hp->next) {
 					if ((hval = switch_event_get_header(event, hp->name))) {
 						const char *comp_to = hp->value;
-						int pos = 1, cmp = 0;
+						int pos = 1, cmp = 0, or = 0;
 
 						while (comp_to && *comp_to) {
 							if (*comp_to == '+') {
 								pos = 1;
 							} else if (*comp_to == '-') {
 								pos = 0;
+							} else if (*comp_to == '|') {
+								or = 1;
 							} else if (*comp_to != ' ') {
 								break;
 							}
@@ -349,7 +351,10 @@ static void event_handler(switch_event_t *event)
 						}
 
 						if (cmp) {
-							if (pos) {
+							if (or) {
+								send = 1;
+								break;
+							} else if (pos) {
 								send = 1;
 							} else {
 								send = 0;
