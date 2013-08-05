@@ -2881,12 +2881,15 @@ typedef struct {
 	int up;
 	int total_hits;
 	int hits;
+	int misses;
 	int sleep;
 	int expires;
 	int default_sleep;
 	int default_expires;
 	int once;
+	int max_misses;
 	switch_tone_detect_callback_t callback;
+	switch_time_t detect_deadline;
 } switch_tone_detect_t;
 
 typedef struct {
@@ -2980,10 +2983,11 @@ static switch_bool_t tone_detect_callback(switch_media_bug_t *bug, void *user_da
 					switch_event_t *event;
 					cont->list[i].hits++;
 
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_DEBUG, "TONE %s HIT %d/%d\n",
-									  cont->list[i].key, cont->list[i].hits, cont->list[i].total_hits);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_DEBUG, "TONE %s HIT %d/%d (misses=%d)\n",
+									  cont->list[i].key, cont->list[i].hits, cont->list[i].total_hits, cont->list[i].misses);
 					cont->list[i].sleep = cont->list[i].default_sleep;
 					cont->list[i].expires = cont->list[i].default_expires;
+					cont->list[i].misses = 0;
 
 					if (cont->list[i].hits >= cont->list[i].total_hits) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_DEBUG, "TONE %s DETECTED\n",
@@ -3025,6 +3029,20 @@ static switch_bool_t tone_detect_callback(switch_media_bug_t *bug, void *user_da
 								switch_event_fire(&event);
 							}
 						}
+					}
+				} else if (cont->list[i].hits > 0) {
+					cont->list[i].misses++;
+					if (cont->list[i].max_misses && cont->list[i].misses >= cont->list[i].max_misses) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_WARNING, "TONE %s Misses=%d\n",
+									  cont->list[i].key, cont->list[i].misses);
+						switch_channel_hangup(switch_core_session_get_channel(cont->session), SWITCH_CAUSE_MEDIA_TIMEOUT);
+					}
+				} else if (cont->list[i].detect_deadline) {
+					switch_time_t now = switch_micro_time_now();
+					if (now >= cont->list[i].detect_deadline) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_WARNING, "TONE %s timed out\n",
+									  cont->list[i].key);
+						switch_channel_hangup(switch_core_session_get_channel(cont->session), SWITCH_CAUSE_MEDIA_TIMEOUT);
 					}
 				}
 			}
@@ -3072,6 +3090,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_tone_detect_session(switch_core_sessi
 	switch_tone_container_t *cont = switch_channel_get_private(channel, "_tone_detect_");
 	char *p, *next;
 	int i = 0, ok = 0, detect_fax = 0;
+	int detect_timeout = 0;
+	int max_misses = 0;
 	switch_media_bug_flag_t bflags = 0;
 	const char *var;
 	switch_codec_implementation_t read_impl = { 0 };
@@ -3114,6 +3134,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_tone_detect_session(switch_core_sessi
 		int tmp = atoi(var);
 		if (tmp > 0) {
 			hits = tmp;
+		}
+	}
+
+	if ((var = switch_channel_get_variable(channel, "tone_detect_timeout"))) {
+		int tmp = atoi(var);
+		if (tmp > 0) {
+			detect_timeout = tmp;
+		}
+	}
+
+	if ((var = switch_channel_get_variable(channel, "tone_detect_max_misses"))) {
+		int tmp = atoi(var);
+		if (tmp > 0) {
+			max_misses = tmp;
 		}
 	}
 
@@ -3167,6 +3201,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_tone_detect_session(switch_core_sessi
 
 	cont->list[cont->index].hits = 0;
 	cont->list[cont->index].total_hits = hits;
+	if (detect_timeout) {
+		cont->list[cont->index].detect_deadline = (switch_micro_time_now() + (detect_timeout * 1000));
+	}
+	cont->list[cont->index].max_misses = max_misses;
 
 	cont->list[cont->index].up = 1;
 	memset(&cont->list[cont->index].mt, 0, sizeof(cont->list[cont->index].mt));
