@@ -701,15 +701,17 @@ static void handle_pri_passive_event(pritap_t *pritap, pri_event *e)
 		layer1 = pri_get_layer1(peertap->pri, pcall->callref);
 		transcap = pri_get_transcap(peertap->pri, pcall->callref);
 
+		ftdm_log(FTDM_LOG_DEBUG, "callref %d has layer 1 format %d and capability %d\n", crv, layer1, transcap);
+#if 0
 		if (PRI_LAYER_1_ULAW != layer1 && PRI_LAYER_1_ALAW != layer1) {
-			ftdm_log(FTDM_LOG_NOTICE, "Not monitoring callref %d with unsupported layer 1 format %d\n", crv, layer1);
-			break;
+			ftdm_log(FTDM_LOG_NOTICE, "callref %d with unsupported layer 1 format %d\n", crv, layer1);
 		}
 		
 		if (transcap != PRI_TRANS_CAP_SPEECH && transcap != PRI_TRANS_CAP_3_1K_AUDIO && transcap != PRI_TRANS_CAP_7K_AUDIO) {
-			ftdm_log(FTDM_LOG_NOTICE, "Not monitoring callref %d with unsupported capability %d\n", crv, transcap);
+			ftdm_log(FTDM_LOG_NOTICE, "callref %d with unsupported capability %d\n", crv, transcap);
 			break;
 		}
+#endif
 
 		fchan = tap_pri_get_fchan(pritap, pcall, e->proceeding.channel);
 		if (!fchan) {
