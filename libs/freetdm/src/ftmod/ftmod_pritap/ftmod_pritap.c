@@ -46,10 +46,11 @@ typedef enum {
 } pritap_flags_t;
 
 typedef enum {
-	PRITAP_MIX_BOTH = 0,
-	PRITAP_MIX_PEER,
-	PRITAP_MIX_SELF,
-} pritap_mix_mode_t;
+	PRITAP_AUDIO_MIX = 0,
+	PRITAP_AUDIO_PEER,
+	PRITAP_AUDIO_SELF,
+	PRITAP_AUDIO_SPLIT
+} pritap_audio_mode_t;
 
 typedef struct {
 	void *callref;
@@ -72,7 +73,7 @@ typedef struct pritap {
 	int32_t flags;
 	struct pri *pri;
 	int debug;
-	pritap_mix_mode_t mixaudio;
+	pritap_audio_mode_t audio_mode;
 	ftdm_channel_t *dchan;
 	ftdm_span_t *span;
 	ftdm_span_t *peerspan;
@@ -101,8 +102,15 @@ static FIO_SPAN_GET_SIG_STATUS_FUNCTION(pritap_get_span_sig_status)
 
 static FIO_CHANNEL_OUTGOING_CALL_FUNCTION(pritap_outgoing_call)
 {
-	ftdm_log(FTDM_LOG_ERROR, "Cannot dial on PRI tapping line!\n");
-	return FTDM_FAIL;
+	if (!ftdmchan->call_data) {
+		ftdm_log_chan_msg(ftdmchan, FTDM_LOG_ERROR, "No tap information associated, can't dial on a pritap channel without an existing call\n");
+		return FTDM_FAIL;
+	}
+	if (ftdm_test_flag(ftdmchan, FTDM_CHANNEL_CALL_STARTED)) {
+		ftdm_log_chan_msg(ftdmchan, FTDM_LOG_ERROR, "Call already started?\n");
+		return FTDM_FAIL;
+	}
+	return FTDM_SUCCESS;
 }
 
 static void s_pri_error(struct pri *pri, char *s)
@@ -252,7 +260,7 @@ static ftdm_state_map_t pritap_state_map = {
 			ZSD_INBOUND,
 			ZSM_UNACCEPTABLE,
 			{FTDM_CHANNEL_STATE_HANGUP, FTDM_END},
-			{FTDM_CHANNEL_STATE_TERMINATING, FTDM_END},
+			{FTDM_CHANNEL_STATE_TERMINATING, FTDM_CHANNEL_STATE_DOWN, FTDM_END},
 		},
 		{
 			ZSD_INBOUND,
@@ -278,7 +286,36 @@ static ftdm_state_map_t pritap_state_map = {
 			{FTDM_CHANNEL_STATE_UP, FTDM_END},
 			{FTDM_CHANNEL_STATE_HANGUP, FTDM_CHANNEL_STATE_TERMINATING, FTDM_END},
 		},
-		
+		{
+			ZSD_OUTBOUND,
+			ZSM_UNACCEPTABLE,
+			{FTDM_CHANNEL_STATE_DOWN, FTDM_END},
+			{FTDM_CHANNEL_STATE_DIALING, FTDM_END}
+		},
+		{
+			ZSD_OUTBOUND,
+			ZSM_UNACCEPTABLE,
+			{FTDM_CHANNEL_STATE_DIALING, FTDM_END},
+			{FTDM_CHANNEL_STATE_UP, FTDM_CHANNEL_STATE_DOWN, FTDM_END}
+		},
+		{
+			ZSD_OUTBOUND,
+			ZSM_UNACCEPTABLE,
+			{FTDM_CHANNEL_STATE_UP, FTDM_END},
+			{FTDM_CHANNEL_STATE_HANGUP, FTDM_CHANNEL_STATE_TERMINATING, FTDM_END}
+		},
+		{
+			ZSD_OUTBOUND,
+			ZSM_UNACCEPTABLE,
+			{FTDM_CHANNEL_STATE_HANGUP, FTDM_END},
+			{FTDM_CHANNEL_STATE_TERMINATING, FTDM_CHANNEL_STATE_DOWN, FTDM_END},
+		},
+		{
+			ZSD_OUTBOUND,
+			ZSM_UNACCEPTABLE,
+			{FTDM_CHANNEL_STATE_TERMINATING, FTDM_END},
+			{FTDM_CHANNEL_STATE_DOWN, FTDM_END},
+		},
 	}
 };
 
@@ -302,20 +339,21 @@ static ftdm_status_t state_advance(ftdm_channel_t *ftdmchan)
 
 	switch (ftdmchan->state) {
 	case FTDM_CHANNEL_STATE_DOWN:
-		{			
+		{
 			ftdm_channel_t *fchan = ftdmchan;
 
-			/* Destroy the peer data first */
+			/* Destroy the peer data unless the peer is running on its own state machine (split audio mode) */
 			if (fchan->call_data) {
 				ftdm_channel_t *peerchan = fchan->call_data;
 				ftdm_channel_t *pchan = peerchan;
 
 				ftdm_channel_lock(peerchan);
 
-				pchan->call_data = NULL;
-				pchan->pflags = 0;
-				ftdm_channel_close(&pchan);
-
+				if (pchan->state == FTDM_CHANNEL_STATE_DOWN && pchan->call_data) {
+					pchan->call_data = NULL;
+					pchan->pflags = 0;
+					ftdm_channel_close(&pchan);
+				}
 				ftdm_channel_unlock(peerchan);
 			} else {
 				ftdm_log_chan_msg(ftdmchan, FTDM_LOG_CRIT, "No call data?\n");
@@ -329,7 +367,11 @@ static ftdm_status_t state_advance(ftdm_channel_t *ftdmchan)
 
 	case FTDM_CHANNEL_STATE_PROGRESS:
 	case FTDM_CHANNEL_STATE_PROGRESS_MEDIA:
+		break;
 	case FTDM_CHANNEL_STATE_HANGUP:
+		{
+			ftdm_set_state(ftdmchan, FTDM_CHANNEL_STATE_DOWN);
+		}
 		break;
 
 	case FTDM_CHANNEL_STATE_UP:
@@ -338,18 +380,33 @@ static ftdm_status_t state_advance(ftdm_channel_t *ftdmchan)
 				ftdm_clear_pflag(ftdmchan, PRITAP_NETWORK_ANSWER);
 				sig.event_id = FTDM_SIGEVENT_UP;
 				ftdm_span_send_signal(ftdmchan->span, &sig);
+			} else if (ftdm_test_flag(ftdmchan, FTDM_CHANNEL_OUTBOUND)) {
+				sig.event_id = FTDM_SIGEVENT_UP;
+				ftdm_span_send_signal(ftdmchan->span, &sig);
 			}
+		}
+		break;
+
+	case FTDM_CHANNEL_STATE_DIALING:
+		{
+			ftdm_set_state(ftdmchan, FTDM_CHANNEL_STATE_UP);
 		}
 		break;
 
 	case FTDM_CHANNEL_STATE_RING:
 		{
+			char buf[10];
+			ftdm_channel_t *pchan = ftdmchan->call_data;
 			sig.event_id = FTDM_SIGEVENT_START;
 			/* The ring interface (where the setup was received) is the peer, since we RING the channel
 			 * where PROCEED/PROGRESS is received */
 			ftdm_sigmsg_add_var(&sig, "pritap_ring_interface", PRITAP_GET_INTERFACE(peer_pritap->iface));
+			snprintf(buf, sizeof(buf), "%d", pchan->span_id);
+			ftdm_sigmsg_add_var(&sig, "pritap_peer_span", buf);
+			snprintf(buf, sizeof(buf), "%d", pchan->chan_id);
+			ftdm_sigmsg_add_var(&sig, "pritap_peer_chan", buf);
 			if ((status = ftdm_span_send_signal(ftdmchan->span, &sig) != FTDM_SUCCESS)) {
-				ftdm_set_state_locked(ftdmchan, FTDM_CHANNEL_STATE_HANGUP);
+				ftdm_set_state(ftdmchan, FTDM_CHANNEL_STATE_HANGUP);
 			}
 		}
 		break;
@@ -360,13 +417,13 @@ static ftdm_status_t state_advance(ftdm_channel_t *ftdmchan)
 				sig.event_id = FTDM_SIGEVENT_STOP;
 				status = ftdm_span_send_signal(ftdmchan->span, &sig);
 			}
-			ftdm_set_state_locked(ftdmchan, FTDM_CHANNEL_STATE_DOWN);
+			ftdm_set_state(ftdmchan, FTDM_CHANNEL_STATE_DOWN);
 		}
 		break;
 
 	default:
 		{
-			ftdm_log_chan(ftdmchan, FTDM_LOG_DEBUG, "ignoring state change from %s to %s\n", ftdm_channel_state2str(ftdmchan->last_state), ftdm_channel_state2str(ftdmchan->state));
+			ftdm_log_chan(ftdmchan, FTDM_LOG_DEBUG, "Ignoring state change from %s to %s\n", ftdm_channel_state2str(ftdmchan->last_state), ftdm_channel_state2str(ftdmchan->state));
 		}
 		break;
 	}
@@ -560,7 +617,7 @@ static void tap_pri_put_pcall(pritap_t *pritap, void *callref)
 	ftdm_mutex_unlock(pritap->pcalls_lock);
 }
 
-static __inline__ ftdm_channel_t *tap_pri_get_fchan(pritap_t *pritap, passive_call_t *pcall, int channel)
+static __inline__ ftdm_channel_t *tap_pri_get_fchan(pritap_t *pritap, passive_call_t *pcall, int channel, int open)
 {
 	ftdm_channel_t *fchan = NULL;
 	int err = 0;
@@ -577,6 +634,10 @@ static __inline__ ftdm_channel_t *tap_pri_get_fchan(pritap_t *pritap, passive_ca
 	if (ftdm_test_flag(fchan, FTDM_CHANNEL_INUSE)) {
 		ftdm_log(FTDM_LOG_ERROR, "Channel %d requested in span %s is already in use!\n", channel, pritap->span->name);
 		err = 1;
+		goto done;
+	}
+
+	if (!open) {
 		goto done;
 	}
 
@@ -713,14 +774,14 @@ static void handle_pri_passive_event(pritap_t *pritap, pri_event *e)
 		}
 #endif
 
-		fchan = tap_pri_get_fchan(pritap, pcall, e->proceeding.channel);
+		fchan = tap_pri_get_fchan(pritap, pcall, e->proceeding.channel, 1);
 		if (!fchan) {
 			ftdm_log(FTDM_LOG_ERROR, "Proceeding requested on odd/unavailable channel %s:%d:%d for callref %d\n",
 				pritap->span->name, PRI_SPAN(e->proceeding.channel), PRI_CHANNEL(e->proceeding.channel), crv);
 			break;
 		}
 
-		peerfchan = tap_pri_get_fchan(peertap, pcall, e->proceeding.channel);
+		peerfchan = tap_pri_get_fchan(peertap, pcall, e->proceeding.channel, (pritap->audio_mode == PRITAP_AUDIO_SPLIT ? 0 : 1));
 		if (!peerfchan) {
 			ftdm_log(FTDM_LOG_ERROR, "Proceeding requested on odd/unavailable channel %s:%d:%d for callref %d\n",
 				peertap->span->name, PRI_SPAN(e->proceeding.channel), PRI_CHANNEL(e->proceeding.channel), crv);
@@ -947,13 +1008,12 @@ static ftdm_status_t ftdm_pritap_sig_read(ftdm_channel_t *ftdmchan, void *data, 
 		return FTDM_SUCCESS;
 	}
 
-	if (pritap->mixaudio == PRITAP_MIX_SELF) {
+	if (pritap->audio_mode == PRITAP_AUDIO_SELF || pritap->audio_mode == PRITAP_AUDIO_SPLIT) {
 		return FTDM_SUCCESS;
 	}
 
-	if (pritap->mixaudio == PRITAP_MIX_PEER) {
-		/* start out by clearing the self audio to make sure we don't return audio we were
-		 * not supposed to in an error condition  */
+	if (pritap->audio_mode == PRITAP_AUDIO_PEER) {
+		/* Clear the self audio as only the peer audio was requested */
 		memset(data, FTDM_SILENCE_VALUE(ftdmchan), size);
 	}
 
@@ -974,12 +1034,14 @@ static ftdm_status_t ftdm_pritap_sig_read(ftdm_channel_t *ftdmchan, void *data, 
 		return FTDM_FAIL;
 	}
 
-	if (pritap->mixaudio == PRITAP_MIX_PEER) {
+	if (pritap->audio_mode == PRITAP_AUDIO_PEER) {
 		/* only the peer audio is requested */
 		memcpy(data, peerbuf, size);
 		return FTDM_SUCCESS;
 	}
 
+	/* Code below is for PRITAP_AUDIO_MIX */
+	ftdm_assert_return(pritap->audio_mode == PRITAP_AUDIO_MIX, FTDM_FAIL, "Invalid audio mode");
 	codec_func = peerchan->native_codec == FTDM_CODEC_ULAW ? fio_ulaw2slin : peerchan->native_codec == FTDM_CODEC_ALAW ? fio_alaw2slin : NULL;
 	if (codec_func) {
 		sizeread = size;
@@ -1035,7 +1097,7 @@ static FIO_CONFIGURE_SPAN_SIGNALING_FUNCTION(ftdm_pritap_configure_span)
 	uint32_t i;
 	const char *var, *val;
 	const char *debug = NULL;
-	pritap_mix_mode_t mixaudio = PRITAP_MIX_BOTH;
+	pritap_audio_mode_t audio_mode = PRITAP_AUDIO_MIX;
 	ftdm_channel_t *dchan = NULL;
 	pritap_t *pritap = NULL;
 	ftdm_span_t *peerspan = NULL;
@@ -1065,16 +1127,26 @@ static FIO_CONFIGURE_SPAN_SIGNALING_FUNCTION(ftdm_pritap_configure_span)
 
 		if (!strcasecmp(var, "debug")) {
 			debug = val;
-		} else if (!strcasecmp(var, "mixaudio")) {
-			if (ftdm_true(val) || !strcasecmp(val, "both")) {
-				ftdm_log(FTDM_LOG_DEBUG, "Setting mix audio mode to 'both' for span %s\n", span->name);
-				mixaudio = PRITAP_MIX_BOTH;
+		/* Parameter value is audiomode but we keep mixaudio parameter and old values for backwards compatibility */
+		} else if (!strcasecmp(var, "mixaudio") || !strcasecmp(var, "audiomode")) {
+			if (!strcasecmp(var, "mixaudio") && (ftdm_true(val) || !strcasecmp(val, "both"))) {
+				ftdm_log(FTDM_LOG_DEBUG, "Setting mixaudio to '%s' for span %s\n", val, span->name);
+				audio_mode = PRITAP_AUDIO_MIX;
+			} else if (!strcasecmp(var, "audiomode") && !strcasecmp(val, "mix")) {
+				ftdm_log(FTDM_LOG_DEBUG, "Setting audio mode to '%s' for span %s\n", val, span->name);
+				audio_mode = PRITAP_AUDIO_MIX;
 			} else if (!strcasecmp(val, "peer")) {
-				ftdm_log(FTDM_LOG_DEBUG, "Setting mix audio mode to 'peer' for span %s\n", span->name);
-				mixaudio = PRITAP_MIX_PEER;
+				ftdm_log(FTDM_LOG_DEBUG, "Setting audio mode to '%s' for span %s\n", val, span->name);
+				audio_mode = PRITAP_AUDIO_PEER;
+			} else if (!strcasecmp(val, "split")) {
+				ftdm_log(FTDM_LOG_DEBUG, "Setting audio mode to '%s' for span %s\n", val, span->name);
+				audio_mode = PRITAP_AUDIO_SPLIT;
+			} else if (!strcasecmp(val, "self")) {
+				ftdm_log(FTDM_LOG_DEBUG, "Setting audio mode to '%s' for span %s\n", val, span->name);
+				audio_mode = PRITAP_AUDIO_SELF;
 			} else {
-				ftdm_log(FTDM_LOG_DEBUG, "Setting mix audio mode to 'self' for span %s\n", span->name);
-				mixaudio = PRITAP_MIX_SELF;
+				ftdm_log(FTDM_LOG_WARNING, "Invalid value '%s', defaulting audio mode to 'self' for span %s\n", val, span->name);
+				audio_mode = PRITAP_AUDIO_SELF;
 			}
 		} else if (!strcasecmp(var, "interface")) {
 			if (!strcasecmp(val, "cpe")) {
@@ -1107,7 +1179,7 @@ static FIO_CONFIGURE_SPAN_SIGNALING_FUNCTION(ftdm_pritap_configure_span)
 	pritap->debug = parse_debug(debug);
 	pritap->dchan = dchan;
 	pritap->peerspan = peerspan;
-	pritap->mixaudio = mixaudio;
+	pritap->audio_mode = audio_mode;
 	pritap->iface = iface;
 
 	span->start = ftdm_pritap_start;
