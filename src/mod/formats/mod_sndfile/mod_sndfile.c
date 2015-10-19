@@ -61,7 +61,7 @@ static switch_status_t sndfile_file_open(switch_file_handle_t *handle, const cha
 	char *ext;
 	struct format_map *map = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
-	char *alt_path = NULL, *last, *ldup = NULL;
+	char *mpath = NULL, *alt_path = NULL, *last, *ldup = NULL;
 	size_t alt_len = 0;
 	int rates[4] = { 8000, 16000, 32000, 48000 };
 	int i;
@@ -72,9 +72,18 @@ static switch_status_t sndfile_file_open(switch_file_handle_t *handle, const cha
 	char ps = '/';
 #endif
 
-	if ((ext = strrchr(path, '.')) == 0) {
+	mpath = strdup(path);
+	if ((ext = strrchr(mpath, '.')) == 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid Format\n");
 		return SWITCH_STATUS_GENERR;
+	}
+	if (!strcasecmp(ext, ".tmp")) {
+		/* temporary file, try to get the real extension */
+		*ext = '\0';
+		if ((ext = strrchr(mpath, '.')) == 0) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid Format\n");
+			return SWITCH_STATUS_GENERR;
+		}
 	}
 	ext++;
 
@@ -228,6 +237,7 @@ static switch_status_t sndfile_file_open(switch_file_handle_t *handle, const cha
 
 	switch_safe_free(alt_path);
 	switch_safe_free(ldup);
+	switch_safe_free(mpath);
 
 	return status;
 }
